@@ -24,6 +24,14 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(security_scheme["in"], "cookie")
         self.assertEqual(security_scheme["name"], "saver_session")
         self.assertEqual(schema["paths"]["/auth/me"]["get"]["security"], [{"APIKeyCookie": []}])
+        self.assertEqual(
+            schema["paths"]["/auth/withdraw/authorize"]["get"]["security"],
+            [{"APIKeyCookie": []}],
+        )
+        self.assertEqual(
+            schema["paths"]["/auth/withdraw/redirect"]["get"]["security"],
+            [{"APIKeyCookie": []}],
+        )
 
 
 if __name__ == "__main__":

@@ -22,7 +22,9 @@ auth_router = APIRouter(tags=["인증"])
 KAKAO_AUTHORIZE_URL = "https://kauth.kakao.com/oauth/authorize"
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 KAKAO_PROFILE_URL = "https://kapi.kakao.com/v2/user/me"
+KAKAO_UNLINK_URL = "https://kapi.kakao.com/v1/user/unlink"
 OAUTH_STATE_COOKIE = "kakao_oauth_state"
+WITHDRAW_STATE_COOKIE = "kakao_withdraw_state"
 session_cookie = APIKeyCookie(
     name=SESSION_COOKIE_NAME,
     auto_error=False,
@@ -50,7 +52,7 @@ async def _request_kakao_profile(
     client_key: str,
     client_secret: str,
     redirect_uri: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     try:
         token_response = await client.post(
             KAKAO_TOKEN_URL,
@@ -81,7 +83,23 @@ async def _request_kakao_profile(
 
     if not isinstance(profile, dict):
         raise HTTPException(status_code=502, detail="카카오 사용자 정보 형식이 올바르지 않습니다.")
-    return profile
+    return profile, access_token
+
+
+async def _unlink_kakao_user(client: httpx.AsyncClient, access_token: str) -> int:
+    try:
+        response = await client.post(
+            KAKAO_UNLINK_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        unlinked_user_id = int(response.json()["id"])
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="카카오 계정 연결을 해제하지 못했습니다.",
+        ) from exc
+    return unlinked_user_id
 
 
 def _user_values(profile: dict[str, Any], default_profile_image: str) -> tuple[int, str, str]:
@@ -122,12 +140,24 @@ async def get_current_user_id(
             detail="로그인이 필요합니다.",
         )
     try:
-        return read_session_cookie(cookie, request.app.state.session_secret)
+        user_id = read_session_cookie(cookie, request.app.state.session_secret)
     except InvalidSession as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="세션이 유효하지 않거나 만료되었습니다.",
         ) from exc
+
+    async with request.app.state.pool.acquire() as connection:
+        user_exists = await connection.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
+            user_id,
+        )
+    if not user_exists:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="세션 사용자를 찾을 수 없습니다.",
+        )
+    return user_id
 
 
 @auth_router.get(
@@ -197,7 +227,7 @@ async def redirect(
         raise HTTPException(status_code=400, detail="유효하지 않은 OAuth state입니다.")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        profile = await _request_kakao_profile(
+        profile, _access_token = await _request_kakao_profile(
             client,
             code=code,
             client_key=request.app.state.kakao_client_key,
@@ -278,5 +308,114 @@ async def me(
 )
 async def logout() -> Response:
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    return response
+
+
+@auth_router.get(
+    "/auth/withdraw/authorize",
+    summary="계정 탈퇴용 카카오 재인증 시작",
+    description=(
+        "현재 Saver 세션을 검증한 뒤 카카오 계정 연결 끊기에 필요한 일회성 액세스 토큰을 얻기 위해 "
+        "카카오 OAuth 인가 화면으로 이동합니다. 이 단계에서는 계정을 삭제하지 않습니다."
+    ),
+    response_class=RedirectResponse,
+    responses={
+        307: {"description": "카카오 재인증 화면으로 리다이렉트"},
+        401: {"description": "Saver 세션 쿠키가 없거나 유효하지 않음"},
+    },
+)
+async def withdraw_authorize(
+    request: Request,
+    _user_id: Annotated[int, Depends(get_current_user_id)],
+):
+    state_value = secrets.token_urlsafe(32)
+    redirect_uri = f"{request.app.state.host}/auth/withdraw/redirect"
+    query = urlencode(
+        {
+            "response_type": "code",
+            "client_id": request.app.state.kakao_client_key,
+            "redirect_uri": redirect_uri,
+            "state": state_value,
+        }
+    )
+    response = RedirectResponse(f"{KAKAO_AUTHORIZE_URL}?{query}")
+    response.set_cookie(
+        key=WITHDRAW_STATE_COOKIE,
+        value=state_value,
+        max_age=600,
+        httponly=True,
+        secure=request.app.state.host.startswith("https://"),
+        samesite="lax",
+    )
+    return response
+
+
+@auth_router.get(
+    "/auth/withdraw/redirect",
+    summary="카카오 연결 해제 및 계정 탈퇴 완료",
+    description=(
+        "카카오 재인증 계정이 현재 Saver 사용자와 같은지 확인하고 카카오 연결 끊기 API를 호출합니다. "
+        "연결 끊기가 성공한 경우에만 로컬 사용자 행을 즉시 삭제하고 Saver 세션 쿠키를 제거합니다."
+    ),
+    response_class=RedirectResponse,
+    responses={
+        307: {"description": "탈퇴 완료 후 서비스 루트로 리다이렉트"},
+        400: {"description": "인가 코드가 없거나 탈퇴용 OAuth state가 일치하지 않음"},
+        401: {"description": "Saver 세션 쿠키가 없거나 유효하지 않음"},
+        409: {"description": "재인증한 카카오 계정이 현재 Saver 사용자와 다름"},
+        502: {"description": "카카오 사용자 확인 또는 연결 끊기 API 호출 실패"},
+    },
+)
+async def withdraw_redirect(
+    request: Request,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    code: Annotated[str | None, Query(description="카카오가 발급한 일회성 인가 코드")] = None,
+    state_value: Annotated[
+        str | None,
+        Query(alias="state", description="탈퇴 시작 시 생성한 CSRF 방지 state 값"),
+    ] = None,
+):
+    expected_state = request.cookies.get(WITHDRAW_STATE_COOKIE)
+    if not code:
+        raise HTTPException(status_code=400, detail="카카오 인증 코드가 없습니다.")
+    if (
+        not state_value
+        or not expected_state
+        or not hmac.compare_digest(state_value, expected_state)
+    ):
+        raise HTTPException(status_code=400, detail="유효하지 않은 탈퇴 OAuth state입니다.")
+
+    redirect_uri = f"{request.app.state.host}/auth/withdraw/redirect"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        profile, access_token = await _request_kakao_profile(
+            client,
+            code=code,
+            client_key=request.app.state.kakao_client_key,
+            client_secret=request.app.state.kakao_client_secret,
+            redirect_uri=redirect_uri,
+        )
+        kakao_user_id, _, _ = _user_values(
+            profile,
+            request.app.state.default_profile_image,
+        )
+        if kakao_user_id != user_id:
+            raise HTTPException(
+                status_code=409,
+                detail="재인증한 카카오 계정이 현재 사용자와 일치하지 않습니다.",
+            )
+
+        unlinked_user_id = await _unlink_kakao_user(client, access_token)
+        if unlinked_user_id != user_id:
+            raise HTTPException(
+                status_code=502,
+                detail="카카오 연결 해제 결과의 사용자 ID가 일치하지 않습니다.",
+            )
+
+    async with request.app.state.pool.acquire() as connection:
+        await connection.execute("DELETE FROM users WHERE id = $1", user_id)
+
+    response = RedirectResponse(url="/?withdrawn=true")
+    response.delete_cookie(WITHDRAW_STATE_COOKIE)
     response.delete_cookie(SESSION_COOKIE_NAME)
     return response
