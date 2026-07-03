@@ -1,14 +1,15 @@
-import hmac
-import secrets
+# 기본 패키지
 from typing import Annotated, Any
 from urllib.parse import urlencode
-
-import httpx
+import hmac
+import secrets
+# 외부 패키지
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyCookie
 from pydantic import BaseModel, Field
-
+import httpx
+# 내부 패키지
 from src.auth.session import (
     SESSION_COOKIE_NAME,
     InvalidSession,
@@ -414,6 +415,7 @@ async def withdraw_redirect(
 
     async with request.app.state.pool.acquire() as connection:
         await connection.execute("DELETE FROM users WHERE id = $1", user_id)
+        await connection.execute("DELETE FROM blogs WHERE author_id = $1", user_id)
 
     response = RedirectResponse(url="/?withdrawn=true")
     response.delete_cookie(WITHDRAW_STATE_COOKIE)

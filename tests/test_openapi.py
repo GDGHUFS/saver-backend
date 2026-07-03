@@ -33,6 +33,28 @@ class OpenApiTest(unittest.TestCase):
             [{"APIKeyCookie": []}],
         )
 
+    def test_blog_endpoints_document_success_and_expected_errors(self):
+        schema = app.openapi()
+        blog_path = schema["paths"]["/blog/{blog_id}"]
+
+        self.assertIn("get", schema["paths"]["/blog/latest"])
+        author_operation = schema["paths"]["/blog/author/{user_id}"]["get"]
+        self.assertNotIn("security", author_operation)
+        self.assertEqual(set(author_operation["responses"]), {"200", "404", "422", "503"})
+        self.assertEqual(
+            schema["paths"]["/blog/"]["post"]["security"],
+            [{"APIKeyCookie": []}],
+        )
+        self.assertNotIn("security", blog_path["get"])
+        self.assertEqual(blog_path["put"]["security"], [{"APIKeyCookie": []}])
+        self.assertEqual(blog_path["delete"]["security"], [{"APIKeyCookie": []}])
+        self.assertEqual(set(blog_path["get"]["responses"]), {"200", "404", "422", "503"})
+        self.assertEqual(set(blog_path["put"]["responses"]), {"204", "401", "404", "422", "503"})
+        self.assertEqual(
+            set(blog_path["delete"]["responses"]),
+            {"204", "401", "404", "422", "503"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

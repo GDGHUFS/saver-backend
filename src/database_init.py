@@ -18,3 +18,17 @@ async def init_db(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS blogs (
+                id serial,
+                title TEXT NOT NULL CHECK (length(btrim(title)) > 0),
+                content TEXT NOT NULL CHECK (length(btrim(content)) > 0),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                author_id BIGINT NOT NULL,
+                PRIMARY KEY (id),
+                FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )

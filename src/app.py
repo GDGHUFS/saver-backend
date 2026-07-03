@@ -1,10 +1,14 @@
+# 외부 패키지
 from fastapi import FastAPI
 from fastapi.responses import Response
 import asyncpg
 import redis
-from src.logging import setup_logging
+# 내부 패키지
+from src.log import setup_logging
 from src.auth import auth_router
 from src.database_init import init_db
+from src.blog import blog_router
+# 기본 패키지
 from contextlib import asynccontextmanager
 import os
 
@@ -63,6 +67,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(auth_router)
+app.include_router(blog_router, prefix="/blog")
 
 
 DEFAULT_PROFILE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">

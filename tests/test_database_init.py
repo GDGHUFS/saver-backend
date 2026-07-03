@@ -36,12 +36,22 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
 
         await init_db(pool)
 
-        self.assertEqual(len(pool.connection.queries), 1)
+        self.assertEqual(len(pool.connection.queries), 2)
         query = pool.connection.queries[0]
         self.assertIn("CREATE TABLE IF NOT EXISTS users", query)
         self.assertIn("id BIGINT PRIMARY KEY", query)
         self.assertIn("nickname TEXT NOT NULL", query)
         self.assertIn("profile_image TEXT NOT NULL", query)
+
+    async def test_creates_blogs_table_with_author_reference(self):
+        pool = FakePool()
+
+        await init_db(pool)
+
+        query = pool.connection.queries[1]
+        self.assertIn("CREATE TABLE IF NOT EXISTS blogs", query)
+        self.assertIn("author_id BIGINT NOT NULL", query)
+        self.assertIn("FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE", query)
 
 
 if __name__ == "__main__":

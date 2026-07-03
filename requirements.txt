@@ -5,3 +5,4 @@ asyncpg
 redis
 pika
 loguru
+python-dotenv
