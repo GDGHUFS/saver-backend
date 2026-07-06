@@ -2,12 +2,15 @@
 from fastapi import FastAPI
 from fastapi.responses import Response
 import asyncpg
-import redis
+from redis.asyncio import Redis
 # 내부 패키지
 from src.log import setup_logging
 from src.auth import auth_router
 from src.database_init import init_db
 from src.blog import blog_router
+from src.search import search_router
+from src.search.publisher import RabbitMQSearchPublisher, RabbitMQSettings
+from src.search.store import RedisSearchStore
 # 기본 패키지
 from contextlib import asynccontextmanager
 import os
@@ -27,18 +30,49 @@ async def lifespan(app: FastAPI):
     pg_user = os.getenv("PG_USER", "saver")
     pg_password = os.getenv("PG_PASSWORD", "saver")
     pg_database = os.getenv("PG_DATABASE", "saverdb")
-    app.state.pool = await asyncpg.create_pool(
-        user=pg_user,
-        password=pg_password,
-        database=pg_database,
-        host=pg_host,
-        port=pg_port,
-    )
-    redis_host = os.getenv("REDIS_HOST", "localhost")
-    redis_port = int(os.getenv("REDIS_PORT", "6379"))
-    app.state.redis = redis.Redis(host=redis_host, port=redis_port, db=0)
-
+    pool = None
+    redis_client = None
+    search_publisher = None
     try:
+        pool = await asyncpg.create_pool(
+            user=pg_user,
+            password=pg_password,
+            database=pg_database,
+            host=pg_host,
+            port=pg_port,
+        )
+        app.state.pool = pool
+
+        redis_client = Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            db=int(os.getenv("REDIS_DB", "0")),
+            password=os.getenv("REDIS_PASSWORD"),
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+        await redis_client.ping()
+        app.state.redis = redis_client
+        app.state.search_store = RedisSearchStore(
+            redis_client,
+            ticket_ttl=int(os.getenv("SEARCH_MAGIC_CODE_TTL", "60")),
+            query_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
+        )
+
+        search_publisher = RabbitMQSearchPublisher(
+            RabbitMQSettings(
+                host=os.getenv("RABBITMQ_HOST", "localhost"),
+                port=int(os.getenv("RABBITMQ_PORT", "5672")),
+                username=os.getenv("RABBITMQ_USER", "guest"),
+                password=os.getenv("RABBITMQ_PASSWORD", "guest"),
+                virtual_host=os.getenv("RABBITMQ_VHOST", "/"),
+                queue=os.getenv("SEARCH_QUEUE", "saver.search.requests"),
+            )
+        )
+        await search_publisher.start()
+        app.state.search_publisher = search_publisher
+
         await init_db(app.state.pool)
         app.state.kakao_client_secret = kakao_client_secret
         app.state.kakao_client_key = kakao_client_key
@@ -53,8 +87,12 @@ async def lifespan(app: FastAPI):
             raise ValueError("SESSION_MAX_AGE must be greater than zero")
         yield
     finally:
-        app.state.redis.close()
-        await app.state.pool.close()
+        if search_publisher is not None:
+            await search_publisher.close()
+        if redis_client is not None:
+            await redis_client.aclose()
+        if pool is not None:
+            await pool.close()
 
 
 app = FastAPI(
@@ -68,6 +106,7 @@ app = FastAPI(
 )
 app.include_router(auth_router)
 app.include_router(blog_router, prefix="/blog")
+app.include_router(search_router)
 
 
 DEFAULT_PROFILE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">

@@ -69,6 +69,19 @@ class OpenApiTest(unittest.TestCase):
             schema["paths"]["/auth/withdraw/redirect"]["get"]["responses"],
         )
 
+    def test_search_endpoints_document_async_status_and_failures(self):
+        schema = app.openapi()
+
+        submit = schema["paths"]["/search"]["post"]
+        result = schema["paths"]["/search/{magic_code}"]["get"]
+        self.assertEqual(set(submit["responses"]), {"202", "401", "422", "503"})
+        self.assertEqual(
+            set(result["responses"]),
+            {"200", "202", "401", "404", "422", "502", "503"},
+        )
+        self.assertEqual(submit["security"], [{"APIKeyCookie": []}])
+        self.assertEqual(result["security"], [{"APIKeyCookie": []}])
+
 
 if __name__ == "__main__":
     unittest.main()
