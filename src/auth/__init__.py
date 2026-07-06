@@ -1,8 +1,9 @@
 # 기본 패키지
-from typing import Annotated, Any
-from urllib.parse import urlencode
+import asyncio
 import hmac
 import secrets
+from typing import Annotated, Any
+from urllib.parse import urlencode
 # 외부 패키지
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -36,6 +37,7 @@ session_cookie = APIKeyCookie(
 
 # 애플리케이션 오류와 구분할 수 있는 일시적인 저장소 장애만 안정적인 API 오류로 변환한다.
 DATABASE_ERRORS = (asyncpg.PostgresError, asyncpg.InterfaceError, TimeoutError, OSError)
+WITHDRAW_LOCAL_DELETE_RETRY_DELAYS = (0.05, 0.15)
 
 
 def _storage_unavailable(operation: str, exc: BaseException) -> HTTPException:
@@ -45,6 +47,36 @@ def _storage_unavailable(operation: str, exc: BaseException) -> HTTPException:
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail="인증 저장소를 일시적으로 사용할 수 없습니다.",
     )
+
+
+def _withdrawal_reconciliation_required(
+    user_id: int,
+    exc: BaseException,
+) -> HTTPException:
+    logger.critical(
+        "Auth reconciliation required: withdraw-local-delete-after-provider-unlink "
+        "user_id={} ({})",
+        user_id,
+        type(exc).__name__,
+    )
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="인증 저장소를 일시적으로 사용할 수 없습니다.",
+    )
+
+
+async def _delete_local_user_after_unlink(pool: asyncpg.Pool, user_id: int) -> None:
+    attempts = len(WITHDRAW_LOCAL_DELETE_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            async with pool.acquire() as connection:
+                # blogs는 FK의 ON DELETE CASCADE로 같은 SQL 문 안에서 함께 삭제된다.
+                await connection.execute("DELETE FROM users WHERE id = $1", user_id)
+            return
+        except DATABASE_ERRORS as exc:
+            if attempt == attempts - 1:
+                raise _withdrawal_reconciliation_required(user_id, exc) from exc
+            await asyncio.sleep(WITHDRAW_LOCAL_DELETE_RETRY_DELAYS[attempt])
 
 
 class UserResponse(BaseModel):
@@ -440,12 +472,7 @@ async def withdraw_redirect(
                 detail="카카오 연결 해제 결과의 사용자 ID가 일치하지 않습니다.",
             )
 
-    try:
-        async with request.app.state.pool.acquire() as connection:
-            await connection.execute("DELETE FROM users WHERE id = $1", user_id)
-            await connection.execute("DELETE FROM blogs WHERE author_id = $1", user_id)
-    except DATABASE_ERRORS as exc:
-        raise _storage_unavailable("withdraw-delete", exc) from exc
+    await _delete_local_user_after_unlink(request.app.state.pool, user_id)
 
     response = RedirectResponse(url="/?withdrawn=true")
     response.delete_cookie(WITHDRAW_STATE_COOKIE)

@@ -104,6 +104,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+# TODO: frontend origin이 확정되면 wildcard 없이 명시적인 origin과
+# allow_credentials=True를 사용하는 CORS 정책을 추가한다.
 app.include_router(auth_router)
 app.include_router(blog_router, prefix="/blog")
 app.include_router(search_router)

@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import asyncpg
 import httpx
@@ -7,6 +8,7 @@ from fastapi import HTTPException
 
 from src.auth import (
     KAKAO_UNLINK_URL,
+    _delete_local_user_after_unlink,
     _unlink_kakao_user,
     _user_values,
     get_current_user_id,
@@ -127,6 +129,74 @@ class SessionUserTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn("connection is closed", raised.exception.detail)
+
+
+class WithdrawalLocalDeleteTest(unittest.IsolatedAsyncioTestCase):
+    async def test_retries_idempotent_cascade_delete_after_unlink(self):
+        class Connection:
+            def __init__(self):
+                self.queries = []
+                self.attempts = 0
+
+            async def execute(self, query, user_id):
+                self.queries.append((query, user_id))
+                self.attempts += 1
+                if self.attempts < 3:
+                    raise asyncpg.InterfaceError("connection is closed")
+
+        class AcquireContext:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class Pool:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def acquire(self):
+                return AcquireContext(self.connection)
+
+        connection = Connection()
+        with patch("src.auth.asyncio.sleep", new=AsyncMock()) as sleep:
+            await _delete_local_user_after_unlink(Pool(connection), 1234)
+
+        self.assertEqual(connection.attempts, 3)
+        self.assertEqual(sleep.await_count, 2)
+        self.assertTrue(all("DELETE FROM users" in query for query, _ in connection.queries))
+        self.assertTrue(all("DELETE FROM blogs" not in query for query, _ in connection.queries))
+
+    async def test_logs_critical_after_local_delete_retries_are_exhausted(self):
+        class AcquireContext:
+            async def __aenter__(self):
+                raise asyncpg.InterfaceError("postgres://user:secret@internal")
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class Pool:
+            def acquire(self):
+                return AcquireContext()
+
+        with (
+            patch("src.auth.asyncio.sleep", new=AsyncMock()),
+            patch("src.auth.logger.critical") as critical,
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await _delete_local_user_after_unlink(Pool(), 1234)
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("secret", raised.exception.detail)
+        critical.assert_called_once_with(
+            "Auth reconciliation required: withdraw-local-delete-after-provider-unlink "
+            "user_id={} ({})",
+            1234,
+            "InterfaceError",
+        )
 
 
 if __name__ == "__main__":
