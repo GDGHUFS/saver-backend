@@ -98,6 +98,9 @@ class RedisSearchStore:
             self.ticket_ttl,
         )
 
+    async def delete_ticket(self, magic_code: str) -> bool:
+        return bool(await self._redis.delete(self.ticket_key(magic_code)))
+
     async def read(self, magic_code: str) -> SearchState | None:
         ticket = await self._redis.hgetall(self.ticket_key(magic_code))
         if not ticket:

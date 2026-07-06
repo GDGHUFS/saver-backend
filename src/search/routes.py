@@ -129,8 +129,9 @@ async def submit_search(
     response_model_by_alias=True,
     summary="검색 상태 및 결과 조회",
     description=(
-        "로그인한 사용자가 magicCode로 Redis 상태만 읽습니다. 처리 중이면 202, 완료된 경우 Redis의 "
-        "JSON 결과와 함께 200을 반환하며 이 API는 외부 검색 호출이나 RabbitMQ 발행을 수행하지 않습니다."
+        "로그인한 사용자가 magicCode로 Redis 상태를 확인합니다. 처리 중이면 202, 완료된 경우 Redis의 "
+        "JSON 결과와 함께 200을 반환하고 사용한 magicCode를 삭제합니다. 이 API는 외부 검색 호출이나 "
+        "RabbitMQ 발행을 수행하지 않습니다."
     ),
     responses={
         200: {"description": "Redis에 저장된 검색 결과가 반환됨"},
@@ -179,4 +180,14 @@ async def get_search_result(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="검색 상태를 처리할 수 없습니다.",
         )
-    return SearchResultResponse(magicCode=magic_code, result=search_state.result)
+    response = SearchResultResponse(magicCode=magic_code, result=search_state.result)
+    try:
+        deleted = await request.app.state.search_store.delete_ticket(magic_code)
+    except REDIS_ERRORS as exc:
+        raise storage_unavailable("delete-ticket", exc) from exc
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="검색 작업을 찾을 수 없거나 magicCode가 만료되었습니다.",
+        )
+    return response

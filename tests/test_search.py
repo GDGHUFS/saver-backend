@@ -28,6 +28,7 @@ class FakeStore:
         self.error = error
         self.created = []
         self.failed = []
+        self.deleted = []
 
     async def create_ticket(self, magic_code, query_hash):
         if self.error:
@@ -42,6 +43,12 @@ class FakeStore:
         if self.error:
             raise self.error
         return self.state
+
+    async def delete_ticket(self, magic_code):
+        if self.error:
+            raise self.error
+        self.deleted.append(magic_code)
+        return True
 
 
 class FakePublisher:
@@ -162,21 +169,54 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 422)
 
     async def test_returns_accepted_while_search_is_pending(self):
-        self.set_dependencies(FakeStore(state=SearchState(status="PENDING")))
+        store = FakeStore(state=SearchState(status="PENDING"))
+        self.set_dependencies(store)
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json(), {"magicCode": MAGIC_CODE, "status": "PENDING"})
+        self.assertEqual(store.deleted, [])
 
     async def test_returns_completed_result_from_store(self):
         result = {"items": [{"title": "검색 결과"}]}
-        self.set_dependencies(FakeStore(state=SearchState(status="COMPLETED", result=result)))
+        store = FakeStore(state=SearchState(status="COMPLETED", result=result))
+        self.set_dependencies(store)
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"], result)
+        self.assertEqual(store.deleted, [MAGIC_CODE])
+
+    async def test_returns_service_unavailable_when_completed_ticket_delete_fails(self):
+        class DeleteFailingStore(FakeStore):
+            async def delete_ticket(self, magic_code):
+                raise RedisConnectionError("redis://user:secret@internal")
+
+        result = {"items": [{"title": "검색 결과"}]}
+        self.set_dependencies(
+            DeleteFailingStore(state=SearchState(status="COMPLETED", result=result))
+        )
+
+        response = await self.client.get(f"/search/{MAGIC_CODE}")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("secret", response.text)
+
+    async def test_returns_not_found_when_completed_ticket_was_already_consumed(self):
+        class ConsumedStore(FakeStore):
+            async def delete_ticket(self, magic_code):
+                return False
+
+        result = {"items": [{"title": "검색 결과"}]}
+        self.set_dependencies(
+            ConsumedStore(state=SearchState(status="COMPLETED", result=result))
+        )
+
+        response = await self.client.get(f"/search/{MAGIC_CODE}")
+
+        self.assertEqual(response.status_code, 404)
 
     async def test_maps_worker_failure_to_stable_bad_gateway_response(self):
         self.set_dependencies(FakeStore(state=SearchState(status="FAILED")))
@@ -209,6 +249,23 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RedisSearchStoreTest(unittest.IsolatedAsyncioTestCase):
+    async def test_deletes_only_magic_code_ticket(self):
+        class FakeRedis:
+            def __init__(self):
+                self.deleted = []
+
+            async def delete(self, key):
+                self.deleted.append(key)
+                return 1
+
+        redis = FakeRedis()
+        store = RedisSearchStore(redis)
+
+        deleted = await store.delete_ticket(MAGIC_CODE)
+
+        self.assertTrue(deleted)
+        self.assertEqual(redis.deleted, [f"saver:search:ticket:{MAGIC_CODE}"])
+
     async def test_rejects_invalid_completed_json(self):
         query_hash = "a" * 64
         query_key = f"saver:search:query:{query_hash}"
