@@ -47,3 +47,28 @@ Redis 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 query 
   운영 이벤트를 남긴다. `user_id` 기록은 카카오 연결 해제 후 로컬 삭제가 최종 실패한 경우로 제한한다.
 - frontend와 backend는 서로 다른 origin으로 배포할 예정이다. 허용할 frontend origin이 확정되면
   credential을 지원하는 명시적 CORS allowlist를 추가한다. wildcard origin은 사용하지 않는다.
+
+## 컨테이너 이미지
+
+로컬 이미지는 저장소 루트에서 다음 명령으로 빌드한다.
+
+```shell
+podman build --file Containerfile --tag saver-backend:local .
+```
+
+로컬 빌드와 실행은 rootless Podman을 기준으로 한다. 컨테이너 내부에서는 별도 사용자를 만들지 않지만,
+컨테이너의 root는 호스트의 비특권 사용자 namespace에 매핑된다. 이 이미지를 rootful container runtime으로
+실행할 때는 동일한 격리 조건이 적용되지 않으므로 별도의 사용자 또는 runtime 보안 정책이 필요하다.
+
+GitHub Actions의 `Build and push container image` workflow는 표준 Docker Buildx action을 사용해 수동으로
+빌드하며, 입력한 태그로 Docker Hub에 push한다. 저장소에 다음 Actions secrets를 설정해야 한다.
+
+- `DOCKERHUB_REGISTRY`: registry hostname. Docker Hub는 `docker.io`
+- `DOCKERHUB_USERNAME`: Docker Hub 사용자 ID
+- `DOCKERHUB_TOKEN`: 이미지 push 권한이 있는 Docker Hub access token
+- `DOCKERHUB_REPOSITORY`: 사용자 계정 아래의 repository 이름(예: `saver-backend`)
+
+컨테이너 실행 시 PostgreSQL, Redis, RabbitMQ, 카카오 인증 및 세션 관련 환경 변수를 주입해야 한다.
+
+TODO: 운영 동시성 기준을 정한 뒤 Gunicorn과 `uvicorn.workers.UvicornWorker`를 사용하는 다중 worker
+구성으로 전환한다. 현재 이미지는 Uvicorn 단일 프로세스로 실행한다.
