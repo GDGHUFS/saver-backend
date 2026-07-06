@@ -55,6 +55,20 @@ class OpenApiTest(unittest.TestCase):
             {"204", "401", "404", "422", "503"},
         )
 
+    def test_auth_database_endpoints_document_storage_failures(self):
+        schema = app.openapi()
+
+        self.assertIn("503", schema["paths"]["/redirect"]["get"]["responses"])
+        self.assertIn("503", schema["paths"]["/auth/me"]["get"]["responses"])
+        self.assertIn(
+            "503",
+            schema["paths"]["/auth/withdraw/authorize"]["get"]["responses"],
+        )
+        self.assertIn(
+            "503",
+            schema["paths"]["/auth/withdraw/redirect"]["get"]["responses"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

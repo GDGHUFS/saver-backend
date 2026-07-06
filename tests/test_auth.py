@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
+import asyncpg
 import httpx
 from fastapi import HTTPException
 
@@ -96,6 +97,36 @@ class SessionUserTest(unittest.IsolatedAsyncioTestCase):
             await get_current_user_id(request, cookie)
 
         self.assertEqual(raised.exception.status_code, 401)
+
+    async def test_maps_database_failure_to_service_unavailable(self):
+        class Connection:
+            async def fetchval(self, query, user_id):
+                raise asyncpg.InterfaceError("connection is closed")
+
+        class AcquireContext:
+            async def __aenter__(self):
+                return Connection()
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class Pool:
+            def acquire(self):
+                return AcquireContext()
+
+        secret = "session-secret"
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(session_secret=secret, pool=Pool()),
+            )
+        )
+        cookie = create_session_cookie(1234, secret, 3600)
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_current_user_id(request, cookie)
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("connection is closed", raised.exception.detail)
 
 
 if __name__ == "__main__":

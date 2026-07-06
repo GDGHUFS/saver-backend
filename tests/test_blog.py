@@ -124,7 +124,7 @@ class BlogEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(connection.user_id, 1234)
         self.assertEqual([blog.id for blog in blogs], [2, 1])
-        self.assertEqual([blog.content for blog in blogs], ["본문 2", "본문 1"])
+        self.assertEqual([blog.title for blog in blogs], ["두 번째 글", "첫 번째 글"])
 
     async def test_returns_empty_list_when_user_has_no_blogs(self):
         class Connection:

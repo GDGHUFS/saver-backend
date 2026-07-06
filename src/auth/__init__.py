@@ -7,7 +7,9 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyCookie
+from loguru import logger
 from pydantic import BaseModel, Field
+import asyncpg
 import httpx
 # 내부 패키지
 from src.auth.session import (
@@ -31,6 +33,18 @@ session_cookie = APIKeyCookie(
     auto_error=False,
     description="카카오 로그인 완료 후 backend가 발급하는 서명된 Saver 세션 쿠키",
 )
+
+# 애플리케이션 오류와 구분할 수 있는 일시적인 저장소 장애만 안정적인 API 오류로 변환한다.
+DATABASE_ERRORS = (asyncpg.PostgresError, asyncpg.InterfaceError, TimeoutError, OSError)
+
+
+def _storage_unavailable(operation: str, exc: BaseException) -> HTTPException:
+    # DB 예외 원문에는 내부 스키마나 접속 정보가 포함될 수 있으므로 그대로 기록하거나 노출하지 않는다.
+    logger.error("Auth storage operation failed: {} ({})", operation, type(exc).__name__)
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="인증 저장소를 일시적으로 사용할 수 없습니다.",
+    )
 
 
 class UserResponse(BaseModel):
@@ -148,11 +162,14 @@ async def get_current_user_id(
             detail="세션이 유효하지 않거나 만료되었습니다.",
         ) from exc
 
-    async with request.app.state.pool.acquire() as connection:
-        user_exists = await connection.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
-            user_id,
-        )
+    try:
+        async with request.app.state.pool.acquire() as connection:
+            user_exists = await connection.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
+                user_id,
+            )
+    except DATABASE_ERRORS as exc:
+        raise _storage_unavailable("session-user-exists", exc) from exc
     if not user_exists:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -207,6 +224,7 @@ async def authorize(request: Request):
         307: {"description": "로그인 처리 후 서비스 루트로 리다이렉트"},
         400: {"description": "인가 코드가 없거나 OAuth state가 일치하지 않음"},
         502: {"description": "카카오 토큰 또는 사용자 정보 API 호출 실패"},
+        503: {"description": "인증 저장소를 일시적으로 사용할 수 없음"},
     },
 )
 async def redirect(
@@ -240,19 +258,22 @@ async def redirect(
         profile,
         request.app.state.default_profile_image,
     )
-    async with request.app.state.pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO users (id, nickname, profile_image)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (id) DO UPDATE
-            SET nickname = EXCLUDED.nickname,
-                profile_image = EXCLUDED.profile_image
-            """,
-            user_id,
-            nickname,
-            profile_image,
-        )
+    try:
+        async with request.app.state.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO users (id, nickname, profile_image)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (id) DO UPDATE
+                SET nickname = EXCLUDED.nickname,
+                    profile_image = EXCLUDED.profile_image
+                """,
+                user_id,
+                nickname,
+                profile_image,
+            )
+    except DATABASE_ERRORS as exc:
+        raise _storage_unavailable("login-upsert", exc) from exc
 
     response = RedirectResponse(url="/")
     response.delete_cookie(OAUTH_STATE_COOKIE)
@@ -282,17 +303,21 @@ async def redirect(
     responses={
         200: {"description": "현재 로그인한 사용자 정보"},
         401: {"description": "세션 쿠키가 없거나 유효하지 않음"},
+        503: {"description": "인증 저장소를 일시적으로 사용할 수 없음"},
     },
 )
 async def me(
     request: Request,
     user_id: Annotated[int, Depends(get_current_user_id)],
 ):
-    async with request.app.state.pool.acquire() as connection:
-        user = await connection.fetchrow(
-            "SELECT id, nickname, profile_image FROM users WHERE id = $1",
-            user_id,
-        )
+    try:
+        async with request.app.state.pool.acquire() as connection:
+            user = await connection.fetchrow(
+                "SELECT id, nickname, profile_image FROM users WHERE id = $1",
+                user_id,
+            )
+    except DATABASE_ERRORS as exc:
+        raise _storage_unavailable("read-current-user", exc) from exc
     if user is None:
         raise HTTPException(status_code=401, detail="세션 사용자를 찾을 수 없습니다.")
     return UserResponse(**dict(user))
@@ -324,6 +349,7 @@ async def logout() -> Response:
     responses={
         307: {"description": "카카오 재인증 화면으로 리다이렉트"},
         401: {"description": "Saver 세션 쿠키가 없거나 유효하지 않음"},
+        503: {"description": "인증 저장소를 일시적으로 사용할 수 없음"},
     },
 )
 async def withdraw_authorize(
@@ -366,6 +392,7 @@ async def withdraw_authorize(
         401: {"description": "Saver 세션 쿠키가 없거나 유효하지 않음"},
         409: {"description": "재인증한 카카오 계정이 현재 Saver 사용자와 다름"},
         502: {"description": "카카오 사용자 확인 또는 연결 끊기 API 호출 실패"},
+        503: {"description": "인증 저장소를 일시적으로 사용할 수 없음"},
     },
 )
 async def withdraw_redirect(
@@ -413,9 +440,12 @@ async def withdraw_redirect(
                 detail="카카오 연결 해제 결과의 사용자 ID가 일치하지 않습니다.",
             )
 
-    async with request.app.state.pool.acquire() as connection:
-        await connection.execute("DELETE FROM users WHERE id = $1", user_id)
-        await connection.execute("DELETE FROM blogs WHERE author_id = $1", user_id)
+    try:
+        async with request.app.state.pool.acquire() as connection:
+            await connection.execute("DELETE FROM users WHERE id = $1", user_id)
+            await connection.execute("DELETE FROM blogs WHERE author_id = $1", user_id)
+    except DATABASE_ERRORS as exc:
+        raise _storage_unavailable("withdraw-delete", exc) from exc
 
     response = RedirectResponse(url="/?withdrawn=true")
     response.delete_cookie(WITHDRAW_STATE_COOKIE)
