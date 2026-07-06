@@ -61,12 +61,14 @@ podman build --file Containerfile --tag saver-backend:local .
 실행할 때는 동일한 격리 조건이 적용되지 않으므로 별도의 사용자 또는 runtime 보안 정책이 필요하다.
 
 GitHub Actions의 `Build and push container image` workflow는 표준 Docker Buildx action을 사용해 수동으로
-빌드하며, 입력한 태그로 Docker Hub에 push한다. 저장소에 다음 Actions secrets를 설정해야 한다.
+빌드하며, 입력한 태그로 Docker Hub에 push한다.
 
-- `DOCKERHUB_REGISTRY`: registry hostname. Docker Hub는 `docker.io`
-- `DOCKERHUB_USERNAME`: Docker Hub 사용자 ID
-- `DOCKERHUB_TOKEN`: 이미지 push 권한이 있는 Docker Hub access token
-- `DOCKERHUB_REPOSITORY`: 사용자 계정 아래의 repository 이름(예: `saver-backend`)
+- 필수 Actions secrets
+  - `DOCKERHUB_USERNAME`: Docker Hub 사용자 ID
+  - `DOCKERHUB_TOKEN`: 이미지 push 권한이 있는 Docker Hub access token
+- 선택 설정 (secrets 또는 repository variables 중 하나로 설정 가능)
+  - `DOCKERHUB_REGISTRY`: registry hostname (기본값 `docker.io`)
+  - `DOCKERHUB_REPOSITORY`: 사용자 계정 아래의 repository 이름 (기본값 저장소 이름)
 
 컨테이너 실행 시 PostgreSQL, Redis, RabbitMQ, 카카오 인증 및 세션 관련 환경 변수를 주입해야 한다.
 
