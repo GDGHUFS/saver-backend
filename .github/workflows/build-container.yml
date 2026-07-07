@@ -19,6 +19,9 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    environment:
+        name: docker 배포
+        deployment: false
     steps:
       - name: Check required secrets
         shell: bash
