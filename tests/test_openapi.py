@@ -82,6 +82,16 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(submit["security"], [{"APIKeyCookie": []}])
         self.assertEqual(result["security"], [{"APIKeyCookie": []}])
 
+    def test_news_endpoint_documents_public_filtered_read(self):
+        schema = app.openapi()
+        operation = schema["paths"]["/news/latest"]["get"]
+
+        self.assertNotIn("security", operation)
+        self.assertEqual(set(operation["responses"]), {"200", "422", "503"})
+        parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+        self.assertEqual(set(parameters), {"count", "publisher"})
+        self.assertFalse(parameters["publisher"]["required"])
+
 
 if __name__ == "__main__":
     unittest.main()

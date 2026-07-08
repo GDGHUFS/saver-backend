@@ -8,6 +8,7 @@ from src.log import setup_logging
 from src.auth import auth_router
 from src.database_init import init_db
 from src.blog import blog_router
+from src.news import news_router
 from src.search import search_router
 from src.search.publisher import RabbitMQSearchPublisher, RabbitMQSettings
 from src.search.store import RedisSearchStore
@@ -109,6 +110,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(blog_router, prefix="/blog")
 app.include_router(search_router)
+app.include_router(news_router)
 
 
 DEFAULT_PROFILE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
