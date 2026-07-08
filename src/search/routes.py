@@ -180,6 +180,12 @@ async def get_search_result(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="검색 상태를 처리할 수 없습니다.",
         )
+    if search_state.result is None:
+        logger.error("Search data contract violation (MissingCompletedResult)")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="검색 결과를 처리할 수 없습니다.",
+        )
     response = SearchResultResponse(magicCode=magic_code, result=search_state.result)
     try:
         deleted = await request.app.state.search_store.delete_ticket(magic_code)

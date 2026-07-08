@@ -8,6 +8,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from src.app import app
 from src.auth import get_current_user_id
+from src.search.model import KagiSearchResponse
 from src.search.publisher import (
     RabbitMQSearchPublisher,
     RabbitMQSettings,
@@ -19,6 +20,24 @@ from src.search.store import InvalidSearchData, RedisSearchStore, SearchState
 
 MAGIC_CODE = "A" * 43
 SECOND_MAGIC_CODE = "B" * 43
+
+
+def kagi_result() -> KagiSearchResponse:
+    return KagiSearchResponse.model_validate(
+        {
+            "data": {
+                "related_search": [{"title": "연관 검색어"}],
+                "search": [
+                    {
+                        "url": "https://example.com/result",
+                        "title": "검색 결과",
+                        "snippet": "검색 결과 설명",
+                    }
+                ],
+            },
+            "meta": {"ms": 12},
+        }
+    )
 
 
 class FakeStore:
@@ -113,7 +132,7 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.created, [])
 
     async def test_rejects_result_lookup_without_login(self):
-        store = FakeStore(state=SearchState(status="COMPLETED", result=[]))
+        store = FakeStore(state=SearchState(status="COMPLETED", result=kagi_result()))
         self.set_dependencies(store)
         app.dependency_overrides.pop(get_current_user_id, None)
 
@@ -179,14 +198,14 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.deleted, [])
 
     async def test_returns_completed_result_from_store(self):
-        result = {"items": [{"title": "검색 결과"}]}
+        result = kagi_result()
         store = FakeStore(state=SearchState(status="COMPLETED", result=result))
         self.set_dependencies(store)
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["result"], result)
+        self.assertEqual(response.json()["result"], result.model_dump())
         self.assertEqual(store.deleted, [MAGIC_CODE])
 
     async def test_returns_service_unavailable_when_completed_ticket_delete_fails(self):
@@ -194,7 +213,7 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
             async def delete_ticket(self, magic_code):
                 raise RedisConnectionError("redis://user:secret@internal")
 
-        result = {"items": [{"title": "검색 결과"}]}
+        result = kagi_result()
         self.set_dependencies(
             DeleteFailingStore(state=SearchState(status="COMPLETED", result=result))
         )
@@ -209,7 +228,7 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
             async def delete_ticket(self, magic_code):
                 return False
 
-        result = {"items": [{"title": "검색 결과"}]}
+        result = kagi_result()
         self.set_dependencies(
             ConsumedStore(state=SearchState(status="COMPLETED", result=result))
         )
@@ -225,6 +244,15 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertNotIn("error_code", response.text)
+
+    async def test_rejects_completed_state_without_result(self):
+        store = FakeStore(state=SearchState(status="COMPLETED"))
+        self.set_dependencies(store)
+
+        response = await self.client.get(f"/search/{MAGIC_CODE}")
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(store.deleted, [])
 
     async def test_duplicate_requests_use_same_idempotency_job_id(self):
         store = FakeStore()
@@ -280,6 +308,37 @@ class RedisSearchStoreTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(InvalidSearchData):
             await store.read(MAGIC_CODE)
+
+    async def test_rejects_completed_json_outside_kagi_contract(self):
+        query_hash = "a" * 64
+        query_key = f"saver:search:query:{query_hash}"
+
+        class FakeRedis:
+            async def hgetall(self, key):
+                if key.startswith("saver:search:ticket:"):
+                    return {"status": "COMPLETED", "query_key": query_key}
+                return {"status": "COMPLETED", "result": '{"items": []}'}
+
+        store = RedisSearchStore(FakeRedis())
+
+        with self.assertRaises(InvalidSearchData):
+            await store.read(MAGIC_CODE)
+
+    async def test_parses_completed_result_as_kagi_response(self):
+        query_hash = "a" * 64
+        query_key = f"saver:search:query:{query_hash}"
+        expected = kagi_result()
+
+        class FakeRedis:
+            async def hgetall(self, key):
+                if key.startswith("saver:search:ticket:"):
+                    return {"status": "COMPLETED", "query_key": query_key}
+                return {"status": "COMPLETED", "result": expected.to_result_json()}
+
+        state = await RedisSearchStore(FakeRedis()).read(MAGIC_CODE)
+
+        self.assertIsInstance(state.result, KagiSearchResponse)
+        self.assertEqual(state.result, expected)
 
 
 class RabbitMQSearchPublisherTest(unittest.TestCase):

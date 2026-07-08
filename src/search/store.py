@@ -1,9 +1,11 @@
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
+
+from src.search.model import KagiSearchResponse
 
 
 TICKET_PREFIX = "saver:search:ticket:"
@@ -50,7 +52,7 @@ class InvalidSearchData(ValueError):
 @dataclass(frozen=True)
 class SearchState:
     status: str
-    result: Any = None
+    result: KagiSearchResponse | None = None
 
 
 class RedisSearchStore:
@@ -130,12 +132,13 @@ class RedisSearchStore:
         if len(raw_result.encode("utf-8")) > self.max_result_bytes:
             raise InvalidSearchData("search result is too large")
         try:
-            result = json.loads(
+            decoded_result = json.loads(
                 raw_result,
                 parse_constant=lambda value: (_ for _ in ()).throw(
                     ValueError(f"invalid JSON constant: {value}")
                 ),
             )
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise InvalidSearchData("search result is not valid JSON") from exc
+            result = KagiSearchResponse.model_validate(decoded_result)
+        except (TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+            raise InvalidSearchData("search result does not match the Kagi contract") from exc
         return SearchState(status="COMPLETED", result=result)

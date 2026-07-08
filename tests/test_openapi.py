@@ -81,6 +81,11 @@ class OpenApiTest(unittest.TestCase):
         )
         self.assertEqual(submit["security"], [{"APIKeyCookie": []}])
         self.assertEqual(result["security"], [{"APIKeyCookie": []}])
+        result_schema = schema["components"]["schemas"]["SearchResultResponse"]
+        self.assertEqual(
+            result_schema["properties"]["result"]["$ref"],
+            "#/components/schemas/KagiSearchResponse",
+        )
 
     def test_news_endpoint_documents_public_filtered_read(self):
         schema = app.openapi()
