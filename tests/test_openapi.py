@@ -89,8 +89,33 @@ class OpenApiTest(unittest.TestCase):
 
     def test_news_endpoint_documents_public_filtered_read(self):
         schema = app.openapi()
+        publishers_operation = schema["paths"]["/news/publishers"]["get"]
+        publisher_operation = schema["paths"]["/news/publishers/{publisher}"]["get"]
         operation = schema["paths"]["/news/latest"]["get"]
         page_operation = schema["paths"]["/news/latest/page"]["get"]
+
+        self.assertNotIn("security", publishers_operation)
+        self.assertEqual(set(publishers_operation["responses"]), {"200", "503"})
+        self.assertEqual(
+            publishers_operation["responses"]["200"]["content"]["application/json"]["schema"][
+                "items"
+            ]["$ref"],
+            "#/components/schemas/NewsPublisherResponse",
+        )
+
+        self.assertNotIn("security", publisher_operation)
+        self.assertEqual(set(publisher_operation["responses"]), {"200", "404", "422", "503"})
+        publisher_parameters = {
+            parameter["name"]: parameter for parameter in publisher_operation["parameters"]
+        }
+        self.assertEqual(set(publisher_parameters), {"publisher"})
+        self.assertTrue(publisher_parameters["publisher"]["required"])
+        self.assertEqual(
+            publisher_operation["responses"]["200"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/NewsPublisherResponse",
+        )
 
         self.assertNotIn("security", operation)
         self.assertEqual(set(operation["responses"]), {"200", "422", "503"})

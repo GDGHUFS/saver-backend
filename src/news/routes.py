@@ -12,7 +12,9 @@ from src.news.model import (
     NewsItemResponse,
     NewsPageResponse,
     NewsPageSize,
+    NewsPublisherResponse,
     Publisher,
+    PublisherPath,
     storage_unavailable,
 )
 
@@ -48,6 +50,34 @@ _NEWS_ITEM_SELECT = """
                 FROM news_items
                          INNER JOIN news_feeds ON news_feeds.id = news_items.feed_id
 """
+_NEWS_PUBLISHER_SELECT = """
+                SELECT news_feeds.id,
+                       news_feeds.publisher,
+                       news_feeds.feed_url,
+                       news_feeds.title,
+                       news_feeds.link,
+                       news_feeds.description,
+                       news_feeds.language,
+                       news_feeds.copyright,
+                       news_feeds.managing_editor,
+                       news_feeds.web_master,
+                       news_feeds.pub_date,
+                       news_feeds.last_build_date,
+                       news_feeds.generator,
+                       news_feeds.docs,
+                       news_feeds.ttl,
+                       news_feeds.image,
+                       news_feeds.rating,
+                       COALESCE(
+                           (
+                               SELECT array_agg(category.name ORDER BY category.id)
+                               FROM news_feed_categories AS category
+                               WHERE category.feed_id = news_feeds.id
+                           ),
+                           ARRAY[]::TEXT[]
+                       ) AS categories
+                FROM news_feeds
+"""
 
 
 def _normalize_publisher(publisher: str | None) -> str | None:
@@ -58,6 +88,14 @@ def _normalize_publisher(publisher: str | None) -> str | None:
             detail="발행자 이름은 공백일 수 없습니다.",
         )
     return normalized_publisher
+
+
+def _news_publisher_response(row: dict) -> NewsPublisherResponse:
+    data = dict(row)
+    image = data["image"]
+    if isinstance(image, str):
+        data["image"] = json.loads(image)
+    return NewsPublisherResponse.model_validate(data)
 
 
 def _encode_news_cursor(row: dict) -> str:
@@ -108,6 +146,78 @@ def _invalid_news_cursor() -> HTTPException:
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="뉴스 페이지 커서가 유효하지 않습니다.",
     )
+
+
+@router.get(
+    "/publishers",
+    response_model=list[NewsPublisherResponse],
+    summary="뉴스 발행자 목록 조회",
+    description=(
+        "별도 RSS 수집 작업자가 PostgreSQL에 저장한 RSS 채널의 발행자 정보를 모두 반환합니다. "
+        "발행자 이름은 `news_feeds.publisher`를 기준으로 하며, 이 API는 RSS를 직접 수집하지 "
+        "않고 로그인이 필요하지 않습니다."
+    ),
+    responses={
+        200: {"description": "저장된 발행자 정보를 이름순으로 반환함"},
+        503: {"description": "뉴스 저장소를 일시적으로 사용할 수 없음"},
+    },
+)
+async def get_news_publishers(request: Request) -> list[NewsPublisherResponse]:
+    try:
+        async with request.app.state.pool.acquire() as connection:
+            rows = await connection.fetch(
+                _NEWS_PUBLISHER_SELECT
+                + """
+                ORDER BY news_feeds.publisher ASC, news_feeds.id ASC
+                """
+            )
+    except DATABASE_ERRORS as exc:
+        raise storage_unavailable("publishers", exc) from exc
+
+    return [_news_publisher_response(dict(row)) for row in rows]
+
+
+@router.get(
+    "/publishers/{publisher}",
+    response_model=NewsPublisherResponse,
+    summary="뉴스 발행자 정보 조회",
+    description=(
+        "이름이 정확히 일치하는 RSS 채널 발행자 정보를 반환합니다. 경로의 publisher 값은 "
+        "앞뒤 공백을 제거한 뒤 `news_feeds.publisher`와 정확히 비교합니다. 저장된 발행자가 "
+        "없으면 수집 작업을 시작하지 않고 404를 반환합니다. 이 API는 로그인이 필요하지 않습니다."
+    ),
+    responses={
+        200: {"description": "요청한 발행자 정보를 반환함"},
+        404: {"description": "요청한 이름의 발행자가 저장되어 있지 않음"},
+        422: {"description": "발행자 이름이 유효하지 않음"},
+        503: {"description": "뉴스 저장소를 일시적으로 사용할 수 없음"},
+    },
+)
+async def get_news_publisher(
+    request: Request,
+    publisher: PublisherPath,
+) -> NewsPublisherResponse:
+    normalized_publisher = _normalize_publisher(publisher)
+
+    try:
+        async with request.app.state.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                _NEWS_PUBLISHER_SELECT
+                + """
+                WHERE news_feeds.publisher = $1
+                """,
+                normalized_publisher,
+            )
+    except DATABASE_ERRORS as exc:
+        raise storage_unavailable("publisher", exc) from exc
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="요청한 발행자를 찾을 수 없습니다.",
+        )
+
+    return _news_publisher_response(dict(row))
 
 
 @router.get(

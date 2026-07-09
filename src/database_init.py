@@ -112,8 +112,20 @@ async def init_db(pool: asyncpg.Pool) -> None:
             """
             CREATE INDEX IF NOT EXISTS news_items_latest_idx
                 ON news_items (pub_date DESC NULLS LAST, id DESC);
-            CREATE INDEX IF NOT EXISTS news_feeds_publisher_idx
+            CREATE UNIQUE INDEX IF NOT EXISTS news_feeds_publisher_key
                 ON news_feeds (publisher);
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'news_feeds_publisher_key'
+                ) THEN
+                    ALTER TABLE news_feeds
+                        ADD CONSTRAINT news_feeds_publisher_key
+                        UNIQUE USING INDEX news_feeds_publisher_key;
+                END IF;
+            END $$;
             CREATE UNIQUE INDEX IF NOT EXISTS news_items_feed_guid_idx
                 ON news_items (feed_id, guid)
                 WHERE guid IS NOT NULL;

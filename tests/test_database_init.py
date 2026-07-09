@@ -84,6 +84,8 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
 
         index_query = pool.connection.queries[6]
         self.assertIn("news_items_latest_idx", index_query)
+        self.assertIn("CREATE UNIQUE INDEX IF NOT EXISTS news_feeds_publisher_key", index_query)
+        self.assertIn("ADD CONSTRAINT news_feeds_publisher_key", index_query)
         self.assertIn("news_items_feed_guid_idx", index_query)
         self.assertIn("news_items_feed_link_idx", index_query)
 

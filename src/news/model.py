@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated
 
 import asyncpg
-from fastapi import HTTPException, Query, status
+from fastapi import HTTPException, Path, Query, status
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -59,6 +59,16 @@ Publisher = Annotated[
     ),
 ]
 
+PublisherPath = Annotated[
+    str,
+    Path(
+        min_length=1,
+        max_length=200,
+        description="조회할 발행자 이름. 앞뒤 공백을 제거한 뒤 정확히 일치하는 발행자를 찾습니다.",
+        examples=["한국외대 학보"],
+    ),
+]
+
 
 class NewsItemResponse(BaseModel):
     id: int = Field(description="뉴스 항목의 DB ID", examples=[1])
@@ -78,6 +88,27 @@ class NewsItemResponse(BaseModel):
     source_name: str | None = Field(description="재배포 항목의 원 출처 이름")
     source_url: str | None = Field(description="재배포 항목의 원 출처 RSS URL")
     categories: list[str] = Field(description="RSS item category 이름 목록")
+
+
+class NewsPublisherResponse(BaseModel):
+    id: int = Field(description="RSS 채널의 DB ID", examples=[1])
+    publisher: str = Field(description="발행자 또는 언론사 이름", examples=["한국외대 학보"])
+    feed_url: str = Field(description="RSS 채널 URL", examples=["https://example.com/rss.xml"])
+    title: str = Field(description="RSS channel title", examples=["한국외대 학보 RSS"])
+    link: str = Field(description="발행자 또는 RSS 채널의 대표 URL", examples=["https://example.com"])
+    description: str = Field(description="RSS channel description")
+    language: str | None = Field(description="RSS channel language")
+    copyright: str | None = Field(description="RSS channel copyright")
+    managing_editor: str | None = Field(description="RSS channel managingEditor")
+    web_master: str | None = Field(description="RSS channel webMaster")
+    pub_date: datetime | None = Field(description="RSS channel pubDate")
+    last_build_date: datetime | None = Field(description="RSS channel lastBuildDate")
+    generator: str | None = Field(description="RSS channel generator")
+    docs: str | None = Field(description="RSS specification 문서 URL")
+    ttl: int | None = Field(description="RSS channel TTL(분)")
+    image: dict | None = Field(description="RSS channel image 원 구조")
+    rating: str | None = Field(description="RSS channel rating")
+    categories: list[str] = Field(description="RSS channel category 이름 목록")
 
 
 class NewsPageResponse(BaseModel):

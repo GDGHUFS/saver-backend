@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import asyncpg
 from fastapi import HTTPException
 
-from src.news import get_latest_news, get_latest_news_page
+from src.news import (
+    get_latest_news,
+    get_latest_news_page,
+    get_news_publisher,
+    get_news_publishers,
+)
 
 
 class AcquireContext:
@@ -60,7 +65,99 @@ def news_row(
     }
 
 
+def publisher_row(publisher: str = "테스트 뉴스"):
+    return {
+        "id": 1,
+        "publisher": publisher,
+        "feed_url": "https://example.com/rss.xml",
+        "title": "테스트 뉴스 RSS",
+        "link": "https://example.com",
+        "description": "테스트 뉴스 설명",
+        "language": "ko",
+        "copyright": None,
+        "managing_editor": None,
+        "web_master": None,
+        "pub_date": datetime(2026, 7, 9, 12, 0, tzinfo=UTC),
+        "last_build_date": datetime(2026, 7, 9, 12, 5, tzinfo=UTC),
+        "generator": "rss-worker",
+        "docs": "https://www.rssboard.org/rss-specification",
+        "ttl": 5,
+        "image": '{"url":"https://example.com/logo.png"}',
+        "rating": None,
+        "categories": ["사회", "교육"],
+    }
+
+
 class NewsEndpointTest(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_all_news_publishers_ordered_by_name(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                self.query = query
+                self.values = values
+                return [publisher_row("가나다 뉴스"), publisher_row("한국외대 학보")]
+
+        connection = Connection()
+        result = await get_news_publishers(request_with(connection))
+
+        self.assertEqual(connection.values, ())
+        self.assertIn("FROM news_feeds", connection.query)
+        self.assertIn("ORDER BY news_feeds.publisher ASC", connection.query)
+        self.assertEqual(
+            [publisher.publisher for publisher in result],
+            ["가나다 뉴스", "한국외대 학보"],
+        )
+        self.assertEqual(result[0].categories, ["사회", "교육"])
+        self.assertEqual(result[0].image, {"url": "https://example.com/logo.png"})
+
+    async def test_returns_news_publisher_by_trimmed_exact_name(self):
+        class Connection:
+            async def fetchrow(self, query, *values):
+                self.query = query
+                self.values = values
+                return publisher_row("한국외대 학보")
+
+        connection = Connection()
+        result = await get_news_publisher(
+            request_with(connection),
+            publisher="  한국외대 학보  ",
+        )
+
+        self.assertEqual(connection.values, ("한국외대 학보",))
+        self.assertIn("WHERE news_feeds.publisher = $1", connection.query)
+        self.assertEqual(result.publisher, "한국외대 학보")
+        self.assertEqual(result.feed_url, "https://example.com/rss.xml")
+
+    async def test_returns_not_found_when_news_publisher_does_not_exist(self):
+        class Connection:
+            async def fetchrow(self, query, *values):
+                return None
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_news_publisher(request_with(Connection()), publisher="없는 언론사")
+
+        self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_rejects_whitespace_only_news_publisher_name(self):
+        class Connection:
+            async def fetchrow(self, query, *values):
+                raise AssertionError("DB를 조회하면 안 됩니다.")
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_news_publisher(request_with(Connection()), publisher="   ")
+
+        self.assertEqual(raised.exception.status_code, 422)
+
+    async def test_maps_publisher_database_failure_to_service_unavailable(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                raise asyncpg.InterfaceError("secret connection detail")
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_news_publishers(request_with(Connection()))
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("secret connection detail", raised.exception.detail)
+
     async def test_returns_latest_news_without_publisher_filter(self):
         class Connection:
             async def fetch(self, query, *values):
