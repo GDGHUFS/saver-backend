@@ -72,6 +72,8 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
 
         item_query = pool.connection.queries[4]
         self.assertIn("CREATE TABLE IF NOT EXISTS news_items", item_query)
+        self.assertIn("title TEXT NOT NULL CHECK (length(btrim(title)) > 0)", item_query)
+        self.assertIn("link TEXT NOT NULL CHECK (length(btrim(link)) > 0)", item_query)
         self.assertIn("enclosure_url TEXT", item_query)
         self.assertIn("guid_is_permalink BOOLEAN", item_query)
         self.assertIn("source_url TEXT", item_query)

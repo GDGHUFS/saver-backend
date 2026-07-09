@@ -77,8 +77,8 @@ async def init_db(pool: asyncpg.Pool) -> None:
             CREATE TABLE IF NOT EXISTS news_items (
                 id BIGSERIAL PRIMARY KEY,
                 feed_id BIGINT NOT NULL REFERENCES news_feeds(id) ON DELETE CASCADE,
-                title TEXT,
-                link TEXT,
+                title TEXT NOT NULL CHECK (length(btrim(title)) > 0),
+                link TEXT NOT NULL CHECK (length(btrim(link)) > 0),
                 description TEXT,
                 author TEXT,
                 comments TEXT,
@@ -94,11 +94,7 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 source_url TEXT,
                 extensions JSONB NOT NULL DEFAULT '{}'::JSONB,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                CHECK (
-                    (title IS NOT NULL AND length(btrim(title)) > 0)
-                    OR (description IS NOT NULL AND length(btrim(description)) > 0)
-                )
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
         )

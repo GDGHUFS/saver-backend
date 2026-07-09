@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import asyncpg
 from fastapi import HTTPException
 
-from src.news import get_latest_news
+from src.news import get_latest_news, get_latest_news_page
 
 
 class AcquireContext:
@@ -31,7 +31,14 @@ def request_with(connection):
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pool=Pool(connection))))
 
 
-def news_row(item_id: int = 1, publisher: str = "테스트 뉴스"):
+_DEFAULT_PUB_DATE = object()
+
+
+def news_row(
+    item_id: int = 1,
+    publisher: str = "테스트 뉴스",
+    pub_date=_DEFAULT_PUB_DATE,
+):
     return {
         "id": item_id,
         "publisher": publisher,
@@ -46,7 +53,7 @@ def news_row(item_id: int = 1, publisher: str = "테스트 뉴스"):
         "enclosure_type": None,
         "guid": "article-1",
         "guid_is_permalink": False,
-        "pub_date": datetime.now(UTC),
+        "pub_date": datetime.now(UTC) if pub_date is _DEFAULT_PUB_DATE else pub_date,
         "source_name": None,
         "source_url": None,
         "categories": ["사회", "교육"],
@@ -114,6 +121,117 @@ class NewsEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn("secret connection detail", raised.exception.detail)
+
+    async def test_returns_paginated_latest_news_with_next_cursor(self):
+        first_pub_date = datetime(2026, 7, 9, 12, 0, tzinfo=UTC)
+        second_pub_date = datetime(2026, 7, 9, 11, 0, tzinfo=UTC)
+        third_pub_date = datetime(2026, 7, 9, 10, 0, tzinfo=UTC)
+
+        class Connection:
+            async def fetch(self, query, *values):
+                self.query = query
+                self.values = values
+                return [
+                    news_row(3, pub_date=first_pub_date),
+                    news_row(2, pub_date=second_pub_date),
+                    news_row(1, pub_date=third_pub_date),
+                ]
+
+        connection = Connection()
+        result = await get_latest_news_page(
+            request_with(connection),
+            page_size=2,
+            publisher=None,
+            cursor=None,
+        )
+
+        self.assertEqual(connection.values, (3, None, None, None))
+        self.assertIn("pub_date DESC NULLS LAST", connection.query)
+        self.assertEqual([item.id for item in result.items], [3, 2])
+        self.assertTrue(result.has_more)
+        self.assertIsNotNone(result.next_cursor)
+        self.assertEqual(result.page_size, 2)
+
+    async def test_uses_cursor_to_fetch_next_page(self):
+        cursor_pub_date = datetime(2026, 7, 9, 11, 0, tzinfo=UTC)
+
+        class FirstConnection:
+            async def fetch(self, query, *values):
+                return [
+                    news_row(3, pub_date=datetime(2026, 7, 9, 12, 0, tzinfo=UTC)),
+                    news_row(2, pub_date=cursor_pub_date),
+                    news_row(1, pub_date=datetime(2026, 7, 9, 10, 0, tzinfo=UTC)),
+                ]
+
+        first_page = await get_latest_news_page(
+            request_with(FirstConnection()),
+            page_size=2,
+            publisher=None,
+            cursor=None,
+        )
+
+        class NextConnection:
+            async def fetch(self, query, *values):
+                self.values = values
+                return [news_row(1, pub_date=datetime(2026, 7, 9, 10, 0, tzinfo=UTC))]
+
+        connection = NextConnection()
+        result = await get_latest_news_page(
+            request_with(connection),
+            page_size=2,
+            publisher="  한국외대 학보  ",
+            cursor=first_page.next_cursor,
+        )
+
+        self.assertEqual(connection.values, (3, "한국외대 학보", 2, cursor_pub_date))
+        self.assertEqual([item.id for item in result.items], [1])
+        self.assertFalse(result.has_more)
+        self.assertIsNone(result.next_cursor)
+
+    async def test_rejects_invalid_page_cursor(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                raise AssertionError("DB를 조회하면 안 됩니다.")
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_latest_news_page(
+                request_with(Connection()),
+                page_size=10,
+                publisher=None,
+                cursor="not-a-valid-cursor",
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
+
+    async def test_cursor_supports_news_without_pub_date(self):
+        class FirstConnection:
+            async def fetch(self, query, *values):
+                return [news_row(5, pub_date=None), news_row(4, pub_date=None)]
+
+        first_page = await get_latest_news_page(
+            request_with(FirstConnection()),
+            page_size=1,
+            publisher=None,
+            cursor=None,
+        )
+
+        class NextConnection:
+            async def fetch(self, query, *values):
+                self.query = query
+                self.values = values
+                return [news_row(4, pub_date=None)]
+
+        connection = NextConnection()
+        result = await get_latest_news_page(
+            request_with(connection),
+            page_size=1,
+            publisher=None,
+            cursor=first_page.next_cursor,
+        )
+
+        self.assertEqual(connection.values, (2, None, 5, None))
+        self.assertIn("news_items.pub_date IS NULL", connection.query)
+        self.assertEqual([item.id for item in result.items], [4])
 
 
 if __name__ == "__main__":

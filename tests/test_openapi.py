@@ -90,12 +90,26 @@ class OpenApiTest(unittest.TestCase):
     def test_news_endpoint_documents_public_filtered_read(self):
         schema = app.openapi()
         operation = schema["paths"]["/news/latest"]["get"]
+        page_operation = schema["paths"]["/news/latest/page"]["get"]
 
         self.assertNotIn("security", operation)
         self.assertEqual(set(operation["responses"]), {"200", "422", "503"})
         parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
         self.assertEqual(set(parameters), {"count", "publisher"})
         self.assertFalse(parameters["publisher"]["required"])
+
+        self.assertNotIn("security", page_operation)
+        self.assertEqual(set(page_operation["responses"]), {"200", "422", "503"})
+        page_parameters = {
+            parameter["name"]: parameter for parameter in page_operation["parameters"]
+        }
+        self.assertEqual(set(page_parameters), {"page_size", "publisher", "cursor"})
+        self.assertFalse(page_parameters["cursor"]["required"])
+        self.assertIn("커서 기반 페이지네이션", page_operation["description"])
+        self.assertEqual(
+            page_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/NewsPageResponse",
+        )
 
 
 if __name__ == "__main__":
