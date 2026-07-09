@@ -1,5 +1,6 @@
 # 외부 패키지
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 import asyncpg
 from redis.asyncio import Redis
@@ -15,6 +16,17 @@ from src.search.store import RedisSearchStore
 # 기본 패키지
 from contextlib import asynccontextmanager
 import os
+
+
+def cors_allowed_origins_from_env() -> list[str]:
+    origins = [
+        origin.strip().rstrip("/")
+        for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if "*" in origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must not contain wildcard origin")
+    return origins
 
 
 @asynccontextmanager
@@ -105,8 +117,15 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-# TODO: frontend origin이 확정되면 wildcard 없이 명시적인 origin과
-# allow_credentials=True를 사용하는 CORS 정책을 추가한다.
+cors_allowed_origins = cors_allowed_origins_from_env()
+if cors_allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 app.include_router(auth_router)
 app.include_router(blog_router, prefix="/blog")
 app.include_router(search_router)

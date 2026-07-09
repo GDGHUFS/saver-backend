@@ -45,8 +45,9 @@ Redis 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 query 
 - 카카오 연결 해제 후 로컬 사용자 삭제가 일시적으로 실패하면 짧게 재시도한다. 재시도 후에도 실패하면
   내부 예외 원문은 노출하지 않고 수동 조정 대상을 식별할 `user_id`와 예외 클래스만 포함한 `CRITICAL`
   운영 이벤트를 남긴다. `user_id` 기록은 카카오 연결 해제 후 로컬 삭제가 최종 실패한 경우로 제한한다.
-- frontend와 backend는 서로 다른 origin으로 배포할 예정이다. 허용할 frontend origin이 확정되면
-  credential을 지원하는 명시적 CORS allowlist를 추가한다. wildcard origin은 사용하지 않는다.
+- frontend와 backend가 서로 다른 origin으로 배포되면 `CORS_ALLOWED_ORIGINS`에 허용할 frontend
+  origin을 쉼표로 구분해 설정한다. credential을 지원하기 위해 명시적 allowlist만 사용하며 wildcard
+  origin은 허용하지 않는다.
 
 ## 컨테이너 이미지
 
