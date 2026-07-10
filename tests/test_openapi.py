@@ -136,6 +136,30 @@ class OpenApiTest(unittest.TestCase):
             "#/components/schemas/NewsPageResponse",
         )
 
+    def test_special_days_endpoint_documents_public_monthly_read(self):
+        schema = app.openapi()
+        operation = schema["paths"]["/special-days/{year_month}"]["get"]
+
+        self.assertNotIn("security", operation)
+        self.assertEqual(set(operation["responses"]), {"200", "422", "503"})
+        parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+        self.assertEqual(set(parameters), {"year_month"})
+        self.assertTrue(parameters["year_month"]["required"])
+        self.assertEqual(
+            parameters["year_month"]["schema"]["pattern"],
+            "^[1-9][0-9]{3}-(0[1-9]|1[0-2])$",
+        )
+        self.assertEqual(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["items"][
+                "$ref"
+            ],
+            "#/components/schemas/SpecialDayResponse",
+        )
+        self.assertEqual(
+            set(schema["components"]["schemas"]["SpecialDayKind"]["enum"]),
+            {"국경일", "기념일", "24절기", "잡절"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

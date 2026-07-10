@@ -36,7 +36,7 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
 
         await init_db(pool)
 
-        self.assertEqual(len(pool.connection.queries), 7)
+        self.assertEqual(len(pool.connection.queries), 8)
         query = pool.connection.queries[0]
         self.assertIn("CREATE TABLE IF NOT EXISTS users", query)
         self.assertIn("id BIGINT PRIMARY KEY", query)
@@ -88,6 +88,21 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ADD CONSTRAINT news_feeds_publisher_key", index_query)
         self.assertIn("news_items_feed_guid_idx", index_query)
         self.assertIn("news_items_feed_link_idx", index_query)
+
+    async def test_creates_anniversary_special_days_table_and_indexes(self):
+        pool = FakePool()
+
+        await init_db(pool)
+
+        query = pool.connection.queries[7]
+        self.assertIn("CREATE TABLE IF NOT EXISTS anniversary_special_days", query)
+        self.assertIn("observed_date DATE NOT NULL", query)
+        self.assertIn("date_kind IN ('01', '02', '03', '04')", query)
+        self.assertIn("date_name TEXT NOT NULL", query)
+        self.assertIn("is_holiday BOOLEAN NOT NULL DEFAULT FALSE", query)
+        self.assertIn("anniversary_special_days_unique_key", query)
+        self.assertIn("anniversary_special_days_date_idx", query)
+        self.assertIn("anniversary_special_days_holiday_idx", query)
 
 
 if __name__ == "__main__":

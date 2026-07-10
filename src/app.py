@@ -13,6 +13,7 @@ from src.news import news_router
 from src.search import search_router
 from src.search.publisher import RabbitMQSearchPublisher, RabbitMQSettings
 from src.search.store import RedisSearchStore
+from src.special_days import special_days_router
 # 기본 패키지
 from contextlib import asynccontextmanager
 import os
@@ -130,6 +131,7 @@ app.include_router(auth_router)
 app.include_router(blog_router, prefix="/blog")
 app.include_router(search_router)
 app.include_router(news_router)
+app.include_router(special_days_router)
 
 
 DEFAULT_PROFILE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
