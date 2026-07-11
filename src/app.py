@@ -115,7 +115,7 @@ app = FastAPI(
         "Saver frontend가 사용하는 통합 backend API입니다. "
         "카카오 로그인과 사용자 세션, 간단한 블로그 및 포털 진입점 기능을 제공합니다."
     ),
-    version="0.1.0",
+    version="0.1.2",
     lifespan=lifespan,
 )
 cors_allowed_origins = cors_allowed_origins_from_env()
