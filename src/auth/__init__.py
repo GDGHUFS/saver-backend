@@ -92,6 +92,13 @@ def _redirect_uri(request: Request) -> str:
     return f"{request.app.state.host}/redirect"
 
 
+def _frontend_redirect_url(request: Request, **query: str) -> str:
+    url = f"{request.app.state.frontend_url}/"
+    if query:
+        return f"{url}?{urlencode(query)}"
+    return url
+
+
 async def _request_kakao_profile(
     client: httpx.AsyncClient,
     *,
@@ -249,11 +256,12 @@ async def authorize(request: Request):
     summary="카카오 로그인 콜백 처리",
     description=(
         "카카오가 전달한 인가 코드와 OAuth state를 검증하고 사용자 프로필을 저장합니다. "
-        "완료되면 카카오 액세스 토큰 대신 사용자 ID와 만료시각만 담은 HMAC 서명 Saver 세션 쿠키를 발급합니다."
+        "완료되면 카카오 액세스 토큰 대신 사용자 ID와 만료시각만 담은 HMAC 서명 Saver 세션 쿠키를 "
+        "발급하고 frontend로 이동합니다."
     ),
     response_class=RedirectResponse,
     responses={
-        307: {"description": "로그인 처리 후 서비스 루트로 리다이렉트"},
+        307: {"description": "로그인 처리 후 frontend 서비스 루트로 리다이렉트"},
         400: {"description": "인가 코드가 없거나 OAuth state가 일치하지 않음"},
         502: {"description": "카카오 토큰 또는 사용자 정보 API 호출 실패"},
         503: {"description": "인증 저장소를 일시적으로 사용할 수 없음"},
@@ -307,7 +315,7 @@ async def redirect(
     except DATABASE_ERRORS as exc:
         raise _storage_unavailable("login-upsert", exc) from exc
 
-    response = RedirectResponse(url="/")
+    response = RedirectResponse(url=_frontend_redirect_url(request))
     response.delete_cookie(OAUTH_STATE_COOKIE)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -415,11 +423,12 @@ async def withdraw_authorize(
     summary="카카오 연결 해제 및 계정 탈퇴 완료",
     description=(
         "카카오 재인증 계정이 현재 Saver 사용자와 같은지 확인하고 카카오 연결 끊기 API를 호출합니다. "
-        "연결 끊기가 성공한 경우에만 로컬 사용자 행을 즉시 삭제하고 Saver 세션 쿠키를 제거합니다."
+        "연결 끊기가 성공한 경우에만 로컬 사용자 행을 즉시 삭제하고 Saver 세션 쿠키를 제거한 뒤 "
+        "탈퇴 완료 상태와 함께 frontend로 이동합니다."
     ),
     response_class=RedirectResponse,
     responses={
-        307: {"description": "탈퇴 완료 후 서비스 루트로 리다이렉트"},
+        307: {"description": "탈퇴 완료 후 frontend 서비스 루트로 리다이렉트"},
         400: {"description": "인가 코드가 없거나 탈퇴용 OAuth state가 일치하지 않음"},
         401: {"description": "Saver 세션 쿠키가 없거나 유효하지 않음"},
         409: {"description": "재인증한 카카오 계정이 현재 Saver 사용자와 다름"},
@@ -474,7 +483,9 @@ async def withdraw_redirect(
 
     await _delete_local_user_after_unlink(request.app.state.pool, user_id)
 
-    response = RedirectResponse(url="/?withdrawn=true")
+    response = RedirectResponse(
+        url=_frontend_redirect_url(request, withdrawn="true"),
+    )
     response.delete_cookie(WITHDRAW_STATE_COOKIE)
     response.delete_cookie(SESSION_COOKIE_NAME)
     return response
