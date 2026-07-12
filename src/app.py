@@ -152,6 +152,7 @@ if cors_allowed_origins:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Location"],
     )
 app.include_router(auth_router)
 app.include_router(blog_router, prefix="/blog")

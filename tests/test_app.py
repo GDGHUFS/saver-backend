@@ -1,7 +1,9 @@
 import unittest
 from unittest.mock import patch
 
-from src.app import cors_allowed_origins_from_env, frontend_url_from_env
+import httpx
+
+from src.app import app, cors_allowed_origins_from_env, frontend_url_from_env
 
 
 class FrontendSettingsTest(unittest.TestCase):
@@ -59,6 +61,24 @@ class CorsSettingsTest(unittest.TestCase):
                 cors_allowed_origins_from_env("https://example.com/app"),
                 ["https://example.com", "https://preview.example.com"],
             )
+
+
+class CorsResponseTest(unittest.IsolatedAsyncioTestCase):
+    async def test_exposes_location_header_to_frontend(self):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/",
+                headers={"Origin": "http://localhost:5173"},
+            )
+
+        self.assertEqual(
+            response.headers["access-control-expose-headers"],
+            "Location",
+        )
 
 
 if __name__ == "__main__":
