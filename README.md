@@ -45,8 +45,22 @@ Redis 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 query 
 - 카카오 연결 해제 후 로컬 사용자 삭제가 일시적으로 실패하면 짧게 재시도한다. 재시도 후에도 실패하면
   내부 예외 원문은 노출하지 않고 수동 조정 대상을 식별할 `user_id`와 예외 클래스만 포함한 `CRITICAL`
   운영 이벤트를 남긴다. `user_id` 기록은 카카오 연결 해제 후 로컬 삭제가 최종 실패한 경우로 제한한다.
-- frontend와 backend는 서로 다른 origin으로 배포할 예정이다. 허용할 frontend origin이 확정되면
-  credential을 지원하는 명시적 CORS allowlist를 추가한다. wildcard origin은 사용하지 않는다.
+- frontend와 backend의 공개 주소는 각각 `FRONTEND_URL`과 `HOST`로 설정한다. 예를 들어 frontend가
+  `https://example.com`, backend가 `https://api.example.com`이면 아래처럼 설정한다.
+
+  ```shell
+  FRONTEND_URL=https://example.com
+  HOST=https://api.example.com
+  ```
+
+  로그인 완료 후에는 `FRONTEND_URL/`, 탈퇴 완료 후에는 `FRONTEND_URL/?withdrawn=true`로 이동한다.
+  카카오 개발자 콘솔의 Redirect URI는 frontend가 아니라 backend의 `HOST/redirect`와
+  `HOST/auth/withdraw/redirect`를 등록해야 한다.
+- `FRONTEND_URL`의 origin은 credential CORS allowlist에 자동으로 포함된다. preview나 로컬 frontend 등
+  추가 origin은 `CORS_ALLOWED_ORIGINS`에 쉼표로 구분해 설정한다. wildcard origin은 허용하지 않는다.
+  frontend의 API 요청은 브라우저가 API 호스트 전용 HttpOnly 세션 쿠키를 전달하도록 credential 옵션을
+  포함해야 한다(예: Fetch API의 `credentials: "include"`). 세션 쿠키를 상위 도메인 전체에 공유할
+  필요는 없다.
 
 ## 컨테이너 이미지
 

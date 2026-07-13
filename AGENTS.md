@@ -6,7 +6,20 @@
 - Saver는 검색, 날씨 등 여러 정보를 제공하지만, backend가 외부 정보의 수집이나 검색 결과 생성을 직접 담당하지 않는다.
 - backend는 frontend의 단일 진입점으로서 요청을 검증하고, 적절한 서비스에 작업을 전달하며, 준비된 결과를 사용자에게 반환한다.
 - backend는 사용자 인증과 연계된 간단한 블로그 기능도 직접 제공한다. 블로그는 게시글 작성·조회·수정·삭제 등 기본 기능에 집중하고 불필요하게 복잡한 기능을 추가하지 않는다.
+- 뉴스와 구독형 정보의 RSS 수집은 별도 작업자가 담당하고, backend는 PostgreSQL 스키마를 관리하며 저장된 항목을 조회 API로 제공한다.
 - 주요 기술은 FastAPI, PostgreSQL, Redis, RabbitMQ이다.
+
+## 뉴스 기능의 책임 경계와 저장 계약
+
+- backend는 RSS 원격 서버를 직접 호출하거나 RSS를 수집·파싱하지 않는다. 별도 작업자가 RSS를 가져와 backend가 관리하는 PostgreSQL 테이블에 저장한다.
+- RSS 채널은 `news_feeds`, 채널 category는 `news_feed_categories`, item은 `news_items`, item category는 `news_item_categories`에 저장한다.
+- `news_feeds.publisher`에는 API에서 발행자 필터로 사용할 정규화된 발행자 또는 언론사 이름을 저장한다. 같은 발행자는 수집 작업 전체에서 동일한 이름을 사용한다.
+- RSS 2.0 표준의 단순 필드는 대응하는 컬럼에 저장한다. channel의 `cloud`, `image`, `textInput`과 표준 밖 확장 필드는 JSONB 컬럼에 원 구조를 보존한다.
+- 수집 작업자는 한 feed 안에서 GUID가 있는 item은 `(feed_id, guid)`, GUID가 없고 link가 있는 item은 `(feed_id, link)` 기준으로 중복 삽입되지 않게 upsert한다.
+- 날짜는 원본 시간대를 반영한 `TIMESTAMPTZ`로 저장한다. 파싱할 수 없는 날짜를 현재 시각으로 대체하지 말고 `NULL`로 저장한다.
+- backend의 뉴스 조회 API는 PostgreSQL에 이미 저장된 데이터만 읽으며, 결과가 없다는 이유로 수집 작업을 시작하지 않는다.
+- 뉴스 조회는 로그인 없이 호출할 수 있다. 최신 뉴스는 `news_items.pub_date DESC NULLS LAST, news_items.id DESC` 순으로 정의하고, 발행자 필터는 `news_feeds.publisher`의 정확한 일치로 처리한다.
+- 뉴스 스키마 변경 시 별도 RSS 수집 작업자와의 쓰기 계약 및 배포 순서를 먼저 확인한다.
 
 ## 검색 기능의 책임 경계
 
@@ -83,8 +96,6 @@ Redis 기록과 RabbitMQ 발행 사이의 부분 실패를 고려해야 한다. 
 ## Git 작업 규칙
 
 - 이 프로젝트는 Git으로 관리한다.
-- 현재 `week/1` 브랜치만 존재하는 것은 의도된 초기 상태이다. 이를 기본 브랜치 구성 오류로 간주하거나 임의로 브랜치를 변경하지 않는다.
-- 이후 `week/1`은 `main`에 병합될 수 있고 다른 브랜치가 추가될 수 있으므로, 작업할 때 항상 현재 브랜치와 대상 브랜치를 확인한다.
 - 사용자의 기존 변경 사항을 보존하고, 관련 없는 파일을 되돌리거나 커밋에 섞지 않는다.
 - 커밋은 하나의 논리적 변경 단위로 구성한다.
 - 커밋 메시지는 반드시 한국어로 상세하게 작성한다. 제목에는 변경 목적을 명확히 쓰고, 본문에는 주요 구현 내용과 필요한 경우 검증 방법 및 영향 범위를 설명한다.

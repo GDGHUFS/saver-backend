@@ -81,6 +81,84 @@ class OpenApiTest(unittest.TestCase):
         )
         self.assertEqual(submit["security"], [{"APIKeyCookie": []}])
         self.assertEqual(result["security"], [{"APIKeyCookie": []}])
+        result_schema = schema["components"]["schemas"]["SearchResultResponse"]
+        self.assertEqual(
+            result_schema["properties"]["result"]["$ref"],
+            "#/components/schemas/KagiSearchResponse",
+        )
+
+    def test_news_endpoint_documents_public_filtered_read(self):
+        schema = app.openapi()
+        publishers_operation = schema["paths"]["/news/publishers"]["get"]
+        publisher_operation = schema["paths"]["/news/publishers/{publisher}"]["get"]
+        operation = schema["paths"]["/news/latest"]["get"]
+        page_operation = schema["paths"]["/news/latest/page"]["get"]
+
+        self.assertNotIn("security", publishers_operation)
+        self.assertEqual(set(publishers_operation["responses"]), {"200", "503"})
+        self.assertEqual(
+            publishers_operation["responses"]["200"]["content"]["application/json"]["schema"][
+                "items"
+            ]["$ref"],
+            "#/components/schemas/NewsPublisherResponse",
+        )
+
+        self.assertNotIn("security", publisher_operation)
+        self.assertEqual(set(publisher_operation["responses"]), {"200", "404", "422", "503"})
+        publisher_parameters = {
+            parameter["name"]: parameter for parameter in publisher_operation["parameters"]
+        }
+        self.assertEqual(set(publisher_parameters), {"publisher"})
+        self.assertTrue(publisher_parameters["publisher"]["required"])
+        self.assertEqual(
+            publisher_operation["responses"]["200"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/NewsPublisherResponse",
+        )
+
+        self.assertNotIn("security", operation)
+        self.assertEqual(set(operation["responses"]), {"200", "422", "503"})
+        parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+        self.assertEqual(set(parameters), {"count", "publisher"})
+        self.assertFalse(parameters["publisher"]["required"])
+
+        self.assertNotIn("security", page_operation)
+        self.assertEqual(set(page_operation["responses"]), {"200", "422", "503"})
+        page_parameters = {
+            parameter["name"]: parameter for parameter in page_operation["parameters"]
+        }
+        self.assertEqual(set(page_parameters), {"page_size", "publisher", "cursor"})
+        self.assertFalse(page_parameters["cursor"]["required"])
+        self.assertIn("커서 기반 페이지네이션", page_operation["description"])
+        self.assertEqual(
+            page_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/NewsPageResponse",
+        )
+
+    def test_special_days_endpoint_documents_public_monthly_read(self):
+        schema = app.openapi()
+        operation = schema["paths"]["/special-days/{year_month}"]["get"]
+
+        self.assertNotIn("security", operation)
+        self.assertEqual(set(operation["responses"]), {"200", "422", "503"})
+        parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+        self.assertEqual(set(parameters), {"year_month"})
+        self.assertTrue(parameters["year_month"]["required"])
+        self.assertEqual(
+            parameters["year_month"]["schema"]["pattern"],
+            "^[1-9][0-9]{3}-(0[1-9]|1[0-2])$",
+        )
+        self.assertEqual(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["items"][
+                "$ref"
+            ],
+            "#/components/schemas/SpecialDayResponse",
+        )
+        self.assertEqual(
+            set(schema["components"]["schemas"]["SpecialDayKind"]["enum"]),
+            {"국경일", "기념일", "24절기", "잡절"},
+        )
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
 
         await init_db(pool)
 
-        self.assertEqual(len(pool.connection.queries), 2)
+        self.assertEqual(len(pool.connection.queries), 8)
         query = pool.connection.queries[0]
         self.assertIn("CREATE TABLE IF NOT EXISTS users", query)
         self.assertIn("id BIGINT PRIMARY KEY", query)
@@ -52,6 +52,57 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS blogs", query)
         self.assertIn("author_id BIGINT NOT NULL", query)
         self.assertIn("FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE", query)
+
+    async def test_creates_rss_news_tables_and_indexes(self):
+        pool = FakePool()
+
+        await init_db(pool)
+
+        feed_query = pool.connection.queries[2]
+        self.assertIn("CREATE TABLE IF NOT EXISTS news_feeds", feed_query)
+        self.assertIn("feed_url TEXT NOT NULL UNIQUE", feed_query)
+        self.assertIn("publisher TEXT NOT NULL", feed_query)
+        self.assertIn("cloud JSONB", feed_query)
+        self.assertIn("skip_hours SMALLINT[]", feed_query)
+        self.assertIn("extensions JSONB", feed_query)
+
+        feed_category_query = pool.connection.queries[3]
+        self.assertIn("CREATE TABLE IF NOT EXISTS news_feed_categories", feed_category_query)
+        self.assertIn("REFERENCES news_feeds(id) ON DELETE CASCADE", feed_category_query)
+
+        item_query = pool.connection.queries[4]
+        self.assertIn("CREATE TABLE IF NOT EXISTS news_items", item_query)
+        self.assertIn("title TEXT NOT NULL CHECK (length(btrim(title)) > 0)", item_query)
+        self.assertIn("link TEXT NOT NULL CHECK (length(btrim(link)) > 0)", item_query)
+        self.assertIn("enclosure_url TEXT", item_query)
+        self.assertIn("guid_is_permalink BOOLEAN", item_query)
+        self.assertIn("source_url TEXT", item_query)
+
+        item_category_query = pool.connection.queries[5]
+        self.assertIn("CREATE TABLE IF NOT EXISTS news_item_categories", item_category_query)
+        self.assertIn("REFERENCES news_items(id) ON DELETE CASCADE", item_category_query)
+
+        index_query = pool.connection.queries[6]
+        self.assertIn("news_items_latest_idx", index_query)
+        self.assertIn("CREATE UNIQUE INDEX IF NOT EXISTS news_feeds_publisher_key", index_query)
+        self.assertIn("ADD CONSTRAINT news_feeds_publisher_key", index_query)
+        self.assertIn("news_items_feed_guid_idx", index_query)
+        self.assertIn("news_items_feed_link_idx", index_query)
+
+    async def test_creates_anniversary_special_days_table_and_indexes(self):
+        pool = FakePool()
+
+        await init_db(pool)
+
+        query = pool.connection.queries[7]
+        self.assertIn("CREATE TABLE IF NOT EXISTS anniversary_special_days", query)
+        self.assertIn("observed_date DATE NOT NULL", query)
+        self.assertIn("date_kind IN ('01', '02', '03', '04')", query)
+        self.assertIn("date_name TEXT NOT NULL", query)
+        self.assertIn("is_holiday BOOLEAN NOT NULL DEFAULT FALSE", query)
+        self.assertIn("anniversary_special_days_unique_key", query)
+        self.assertIn("anniversary_special_days_date_idx", query)
+        self.assertIn("anniversary_special_days_holiday_idx", query)
 
 
 if __name__ == "__main__":

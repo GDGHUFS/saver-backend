@@ -9,11 +9,30 @@ from fastapi import HTTPException
 from src.auth import (
     KAKAO_UNLINK_URL,
     _delete_local_user_after_unlink,
+    _frontend_redirect_url,
     _unlink_kakao_user,
     _user_values,
     get_current_user_id,
 )
 from src.auth.session import create_session_cookie
+
+
+class FrontendRedirectTest(unittest.TestCase):
+    def setUp(self):
+        self.request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(frontend_url="https://example.com"),
+            )
+        )
+
+    def test_builds_login_completion_redirect(self):
+        self.assertEqual(_frontend_redirect_url(self.request), "https://example.com/")
+
+    def test_builds_withdrawal_completion_redirect(self):
+        self.assertEqual(
+            _frontend_redirect_url(self.request, withdrawn="true"),
+            "https://example.com/?withdrawn=true",
+        )
 
 
 class UserValuesTest(unittest.TestCase):
