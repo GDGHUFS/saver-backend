@@ -1,5 +1,9 @@
 # Saver backend
 
+## 개발 문서
+
+- [특수 검색엔진 개발자를 위한 콘텐츠 API 가이드](docs/special-search-engine-content-api-guide.md): 뉴스(RSS 저장 결과), 블로그, 특일 API를 순회해 별도 검색 색인을 만드는 방법과 새 검색 작업자 연동 전 확인할 계약을 설명한다.
+
 ## 검색 API
 
 - `POST /search`: 로그인 사용자의 `{"query": "..."}`를 받아 `202`와 `magicCode`를 반환한다.
