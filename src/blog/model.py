@@ -50,6 +50,7 @@ class BlogWriteRequest(BaseModel):
     )
     content: str = Field(
         min_length=1,
+        max_length=30000,
         description="앞뒤 공백을 제외하고 한 글자 이상인 본문",
         examples=["Saver backend의 블로그 API를 구현했습니다."],
     )
