@@ -160,6 +160,46 @@ class OpenApiTest(unittest.TestCase):
             {"국경일", "기념일", "24절기", "잡절"},
         )
 
+    def test_weather_endpoints_document_public_current_and_forecast_reads(self):
+        schema = app.openapi()
+        current = schema["paths"]["/weather/current"]["get"]
+        locations = schema["paths"]["/weather/locations"]["get"]
+        forecast = schema["paths"]["/weather/forecast"]["get"]
+
+        self.assertNotIn("security", current)
+        self.assertEqual(set(current["responses"]), {"200", "503"})
+        self.assertEqual(
+            current["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/NationwideCurrentWeatherResponse",
+        )
+
+        self.assertNotIn("security", locations)
+        self.assertEqual(set(locations["responses"]), {"200", "422", "503"})
+        location_parameters = {
+            parameter["name"]: parameter for parameter in locations["parameters"]
+        }
+        self.assertEqual(set(location_parameters), {"region_level_1", "region_level_2"})
+        self.assertFalse(location_parameters["region_level_1"]["required"])
+        self.assertFalse(location_parameters["region_level_2"]["required"])
+        self.assertEqual(
+            locations["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/WeatherLocationCatalogResponse",
+        )
+
+        self.assertNotIn("security", forecast)
+        self.assertEqual(set(forecast["responses"]), {"200", "404", "422", "503"})
+        parameters = {parameter["name"]: parameter for parameter in forecast["parameters"]}
+        self.assertEqual(set(parameters), {"region", "latitude", "longitude", "hours"})
+        self.assertFalse(parameters["region"]["required"])
+        self.assertFalse(parameters["latitude"]["required"])
+        self.assertFalse(parameters["longitude"]["required"])
+        self.assertEqual(parameters["hours"]["schema"]["minimum"], 1)
+        self.assertEqual(parameters["hours"]["schema"]["maximum"], 72)
+        self.assertEqual(
+            forecast["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/WeatherForecastResponse",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

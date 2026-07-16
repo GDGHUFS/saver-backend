@@ -14,6 +14,8 @@ from src.search import search_router
 from src.search.publisher import RabbitMQSearchPublisher, RabbitMQSettings
 from src.search.store import RedisSearchStore
 from src.special_days import special_days_router
+from src.weather import weather_router
+from src.weather.cache import RedisWeatherCache
 # 기본 패키지
 from contextlib import asynccontextmanager
 import os
@@ -97,6 +99,10 @@ async def lifespan(app: FastAPI):
             ticket_ttl=int(os.getenv("SEARCH_MAGIC_CODE_TTL", "60")),
             query_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
         )
+        app.state.weather_cache = RedisWeatherCache(
+            redis_client,
+            current_ttl=int(os.getenv("WEATHER_CURRENT_CACHE_TTL", "300")),
+        )
 
         search_publisher = RabbitMQSearchPublisher(
             RabbitMQSettings(
@@ -138,9 +144,10 @@ app = FastAPI(
     title="Saver Backend API",
     description=(
         "Saver frontend가 사용하는 통합 backend API입니다. "
-        "카카오 로그인과 사용자 세션, 간단한 블로그 및 포털 진입점 기능을 제공합니다."
+        "카카오 로그인과 사용자 세션, 검색 접수, 간단한 블로그, 뉴스·특일·날씨 조회 및 "
+        "포털 진입점 기능을 제공합니다."
     ),
-    version="0.1.3",
+    version="0.2.1",
     lifespan=lifespan,
 )
 frontend_url = frontend_url_from_env()
@@ -159,6 +166,7 @@ app.include_router(blog_router, prefix="/blog")
 app.include_router(search_router)
 app.include_router(news_router)
 app.include_router(special_days_router)
+app.include_router(weather_router)
 
 
 DEFAULT_PROFILE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
