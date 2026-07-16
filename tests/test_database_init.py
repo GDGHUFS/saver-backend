@@ -36,7 +36,7 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
 
         await init_db(pool)
 
-        self.assertEqual(len(pool.connection.queries), 8)
+        self.assertEqual(len(pool.connection.queries), 9)
         query = pool.connection.queries[0]
         self.assertIn("CREATE TABLE IF NOT EXISTS users", query)
         self.assertIn("id BIGINT PRIMARY KEY", query)
@@ -103,6 +103,21 @@ class InitDbTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("anniversary_special_days_unique_key", query)
         self.assertIn("anniversary_special_days_date_idx", query)
         self.assertIn("anniversary_special_days_holiday_idx", query)
+
+    async def test_creates_weather_tables_and_read_indexes(self):
+        pool = FakePool()
+
+        await init_db(pool)
+
+        query = pool.connection.queries[8]
+        self.assertIn("CREATE TABLE IF NOT EXISTS weather_grid_points", query)
+        self.assertIn("CREATE TABLE IF NOT EXISTS weather_locations", query)
+        self.assertIn("CREATE TABLE IF NOT EXISTS weather_forecast_issues", query)
+        self.assertIn("CREATE TABLE IF NOT EXISTS weather_forecasts", query)
+        self.assertIn("UNIQUE (nx, ny, issued_at)", query)
+        self.assertIn("PRIMARY KEY (forecast_issue_id, forecast_at)", query)
+        self.assertIn("weather_locations_region_names_idx", query)
+        self.assertIn("weather_forecast_issues_latest_grid_idx", query)
 
 
 if __name__ == "__main__":

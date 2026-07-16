@@ -42,6 +42,21 @@ Redis 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 query 
 `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`, `SEARCH_QUEUE`,
 `SEARCH_MAGIC_CODE_TTL`, `SEARCH_QUERY_TTL` 환경 변수로 설정한다.
 
+## 날씨 API
+
+- `GET /weather/current`: 별도 날씨 수집기가 저장한 전국 고유 격자별 최신 발표본에서 현재
+  시각과 가장 가까운 단기예보 한 건을 반환한다.
+- `GET /weather/forecast?region=서울특별시%20종로구&hours=24`: 공백 단위 지역명 토큰이 모두
+  일치하는 격자의 현재 시간대 이후 최신 단기예보를 반환한다.
+- `GET /weather/forecast?latitude=37.5704&longitude=126.9816&hours=24`: 위경도를 기상청
+  5km 격자로 변환해 같은 단기예보를 반환한다.
+
+두 API 모두 로그인 없이 호출할 수 있다. backend는 외부 기상 API를 호출하거나 수집을 시작하지
+않고 `weather_*` PostgreSQL 테이블에 이미 저장된 결과만 읽는다. 전국 현재 현황은 실황 관측값이
+아니므로 응답의 `issued_at`과 `forecast_at`을 함께 확인해야 한다. 지역명과 좌표는 동시에 지정할 수
+없고, 좌표는 위도와 경도를 모두 지정해야 한다. `hours`는 격자별 최대 예보 시간대 수이며 1~72,
+기본 24이다.
+
 ## 운영 정책 및 TODO
 
 - PostgreSQL, Redis, RabbitMQ를 하나의 서비스 묶음으로 취급한다. 시작 시 하나라도 연결할 수 없으면
