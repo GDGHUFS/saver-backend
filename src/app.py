@@ -15,6 +15,7 @@ from src.search.publisher import RabbitMQSearchPublisher, RabbitMQSettings
 from src.search.store import RedisSearchStore
 from src.special_days import special_days_router
 from src.weather import weather_router
+from src.weather.cache import RedisWeatherCache
 # 기본 패키지
 from contextlib import asynccontextmanager
 import os
@@ -97,6 +98,10 @@ async def lifespan(app: FastAPI):
             redis_client,
             ticket_ttl=int(os.getenv("SEARCH_MAGIC_CODE_TTL", "60")),
             query_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
+        )
+        app.state.weather_cache = RedisWeatherCache(
+            redis_client,
+            current_ttl=int(os.getenv("WEATHER_CURRENT_CACHE_TTL", "300")),
         )
 
         search_publisher = RabbitMQSearchPublisher(

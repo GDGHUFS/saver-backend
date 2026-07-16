@@ -163,6 +163,7 @@ class OpenApiTest(unittest.TestCase):
     def test_weather_endpoints_document_public_current_and_forecast_reads(self):
         schema = app.openapi()
         current = schema["paths"]["/weather/current"]["get"]
+        locations = schema["paths"]["/weather/locations"]["get"]
         forecast = schema["paths"]["/weather/forecast"]["get"]
 
         self.assertNotIn("security", current)
@@ -170,6 +171,19 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(
             current["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/NationwideCurrentWeatherResponse",
+        )
+
+        self.assertNotIn("security", locations)
+        self.assertEqual(set(locations["responses"]), {"200", "422", "503"})
+        location_parameters = {
+            parameter["name"]: parameter for parameter in locations["parameters"]
+        }
+        self.assertEqual(set(location_parameters), {"region_level_1", "region_level_2"})
+        self.assertFalse(location_parameters["region_level_1"]["required"])
+        self.assertFalse(location_parameters["region_level_2"]["required"])
+        self.assertEqual(
+            locations["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/WeatherLocationCatalogResponse",
         )
 
         self.assertNotIn("security", forecast)

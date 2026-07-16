@@ -1,9 +1,13 @@
+import asyncio
 from collections import defaultdict
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
+from loguru import logger
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 
+from src.weather.cache import InvalidWeatherCacheData, RedisWeatherCache
 from src.weather.grid import latitude_longitude_to_grid
 from src.weather.model import (
     DATABASE_ERRORS,
@@ -13,11 +17,15 @@ from src.weather.model import (
     NationwideCurrentWeatherItemResponse,
     NationwideCurrentWeatherResponse,
     Region,
+    RegionLevel1,
+    RegionLevel2,
     WeatherForecastItemResponse,
     WeatherForecastResponse,
     WeatherGridForecastResponse,
     WeatherGridResponse,
+    WeatherLocationCatalogResponse,
     WeatherLocationResponse,
+    WeatherRegionOptionResponse,
     invalid_stored_data,
     storage_unavailable,
 )
@@ -31,7 +39,8 @@ REGION_ALIASES = {
     "충남": "충청남도",
     "전북": "전북특별자치도",
     "전라북도": "전북특별자치도",
-    "전남": "전라남도",
+    "전남": "전남광주통합특별시",
+    "전라남도": "전남광주통합특별시",
     "경북": "경상북도",
     "경남": "경상남도",
     "제주도": "제주특별자치도",
@@ -62,6 +71,7 @@ _PRECIPITATION_TYPE_LABELS = {
     "3": "눈",
     "4": "소나기",
 }
+_WEATHER_CACHE_CONNECTION_ERRORS = (RedisError, TimeoutError, OSError)
 
 
 def _forecast_item(row: object) -> WeatherForecastItemResponse:
@@ -100,6 +110,18 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _normalize_region_level(value: str | None, *, name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{name}은 공백일 수 없습니다.",
+        )
+    return normalized
+
+
 def _selector(
     region: str | None,
     latitude: float | None,
@@ -131,24 +153,54 @@ def _selector(
     return "coordinates", None, None, nx, ny
 
 
-@router.get(
-    "/current",
-    response_model=NationwideCurrentWeatherResponse,
-    summary="전국 현재 날씨 현황 조회",
-    description=(
-        "별도 날씨 수집기가 PostgreSQL에 저장한 전국 고유 격자의 최신 단기예보 발표본을 "
-        "조회하고, 각 격자에서 현재 시각과 가장 가까운 예보 한 건을 반환합니다. 응답은 실황 "
-        "관측값이 아니라 단기예보이므로 `issued_at`과 `forecast_at`을 함께 확인해야 합니다. "
-        "현재 시각과 같은 거리에 두 예보가 있으면 이전 시각을 우선합니다. 저장된 예보가 없는 "
-        "격자는 생략하며 외부 기상 API를 호출하거나 수집을 시작하지 않습니다. 로그인 없이 "
-        "호출할 수 있습니다."
-    ),
-    responses={
-        200: {"description": "예보가 저장된 전국 격자의 현재 시각 최근접 단기예보를 반환함"},
-        503: {"description": "날씨 저장소를 사용할 수 없거나 저장 데이터가 유효하지 않음"},
-    },
-)
-async def get_nationwide_current_weather(request: Request) -> NationwideCurrentWeatherResponse:
+def _current_weather_refresh_lock(request: Request) -> asyncio.Lock:
+    state = request.app.state
+    lock = getattr(state, "weather_current_refresh_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        state.weather_current_refresh_lock = lock
+    return lock
+
+
+async def _read_cached_current_weather(
+    cache: RedisWeatherCache | None,
+) -> tuple[NationwideCurrentWeatherResponse | None, bool]:
+    if cache is None:
+        return None, False
+    try:
+        return await cache.read_current(), True
+    except InvalidWeatherCacheData as exc:
+        logger.warning(
+            "Weather cache operation failed: read-current ({})",
+            type(exc).__name__,
+        )
+        return None, True
+    except _WEATHER_CACHE_CONNECTION_ERRORS as exc:
+        logger.warning(
+            "Weather cache operation failed: read-current ({})",
+            type(exc).__name__,
+        )
+        return None, False
+
+
+async def _write_cached_current_weather(
+    cache: RedisWeatherCache | None,
+    response: NationwideCurrentWeatherResponse,
+) -> None:
+    if cache is None:
+        return
+    try:
+        await cache.write_current(response)
+    except (RedisError, InvalidWeatherCacheData, TimeoutError, OSError) as exc:
+        logger.warning(
+            "Weather cache operation failed: write-current ({})",
+            type(exc).__name__,
+        )
+
+
+async def _read_nationwide_current_weather(
+    request: Request,
+) -> NationwideCurrentWeatherResponse:
     try:
         async with request.app.state.pool.acquire() as connection:
             rows = await connection.fetch(
@@ -205,6 +257,159 @@ async def get_nationwide_current_weather(request: Request) -> NationwideCurrentW
         )
     except (KeyError, TypeError, ValueError, ValidationError) as exc:
         raise invalid_stored_data("read-nationwide-current", exc) from exc
+
+
+@router.get(
+    "/current",
+    response_model=NationwideCurrentWeatherResponse,
+    summary="전국 현재 날씨 현황 조회",
+    description=(
+        "별도 날씨 수집기가 PostgreSQL에 저장한 전국 고유 격자의 최신 단기예보 발표본을 "
+        "조회하고, 각 격자에서 현재 시각과 가장 가까운 예보 한 건을 반환합니다. 응답은 실황 "
+        "관측값이 아니라 단기예보이므로 `issued_at`과 `forecast_at`을 함께 확인해야 합니다. "
+        "현재 시각과 같은 거리에 두 예보가 있으면 이전 시각을 우선합니다. 저장된 예보가 없는 "
+        "격자는 생략합니다. PostgreSQL 조회 결과는 Redis에 짧게 캐시하고 같은 backend 프로세스의 "
+        "동시 cache miss는 한 번의 DB 조회로 합칩니다. Redis 캐시를 사용할 수 없거나 캐시 데이터가 "
+        "유효하지 않으면 DB 조회로 안전하게 대체합니다. 외부 기상 API를 호출하거나 수집을 시작하지 "
+        "않으며 로그인 없이 호출할 수 있습니다."
+    ),
+    responses={
+        200: {"description": "예보가 저장된 전국 격자의 현재 시각 최근접 단기예보를 반환함"},
+        503: {"description": "날씨 저장소를 사용할 수 없거나 저장 데이터가 유효하지 않음"},
+    },
+)
+async def get_nationwide_current_weather(request: Request) -> NationwideCurrentWeatherResponse:
+    cache = getattr(request.app.state, "weather_cache", None)
+    cached, cache_available = await _read_cached_current_weather(cache)
+    if cached is not None:
+        return cached
+
+    async with _current_weather_refresh_lock(request):
+        if cache_available:
+            cached, cache_available = await _read_cached_current_weather(cache)
+            if cached is not None:
+                return cached
+        response = await _read_nationwide_current_weather(request)
+        if cache_available:
+            await _write_cached_current_weather(cache, response)
+        return response
+
+
+@router.get(
+    "/locations",
+    response_model=WeatherLocationCatalogResponse,
+    summary="날씨 지역 목록 탐색",
+    description=(
+        "날씨 수집기가 공식 격자·위경도 XLSX에서 PostgreSQL `weather_locations`로 동기화한 "
+        "행정구역 이름을 계층적으로 반환합니다. 파라미터가 없으면 1단계 시·도 목록을, "
+        "`region_level_1`만 지정하면 해당 지역의 2단계 시·군·구 목록을, "
+        "`region_level_1`과 `region_level_2`를 함께 지정하면 3단계 읍·면·동 목록을 반환합니다. "
+        "응답의 `full_name`은 `/weather/forecast`의 `region` 파라미터에 그대로 사용할 수 있습니다. "
+        "하위 지역이 없거나 일치하는 상위 지역이 없으면 빈 목록을 반환하며, 외부 파일이나 기상 "
+        "API를 요청 시점에 호출하지 않습니다. 로그인 없이 호출할 수 있습니다."
+    ),
+    responses={
+        200: {"description": "요청한 단계의 중복 없는 지역 선택지를 이름순으로 반환함"},
+        422: {"description": "상위 지역 파라미터 조합이나 지역명이 유효하지 않음"},
+        503: {"description": "날씨 저장소를 사용할 수 없거나 저장 데이터가 유효하지 않음"},
+    },
+)
+async def get_weather_locations(
+    request: Request,
+    region_level_1: RegionLevel1 = None,
+    region_level_2: RegionLevel2 = None,
+) -> WeatherLocationCatalogResponse:
+    normalized_level_1 = _normalize_region_level(
+        region_level_1,
+        name="region_level_1",
+    )
+    normalized_level_2 = _normalize_region_level(
+        region_level_2,
+        name="region_level_2",
+    )
+    if normalized_level_2 is not None and normalized_level_1 is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="region_level_2는 region_level_1과 함께 지정해야 합니다.",
+        )
+    if normalized_level_1 is not None:
+        normalized_level_1 = REGION_ALIASES.get(
+            normalized_level_1,
+            normalized_level_1,
+        )
+
+    try:
+        async with request.app.state.pool.acquire() as connection:
+            if normalized_level_1 is None:
+                region_level = 1
+                parents = []
+                rows = await connection.fetch(
+                    """
+                    SELECT location.region_level_1 AS name,
+                           location.region_level_1 AS full_name,
+                           BOOL_OR(location.region_level_2 IS NOT NULL) AS has_children
+                    FROM weather_locations AS location
+                    GROUP BY location.region_level_1
+                    ORDER BY location.region_level_1 ASC
+                    """
+                )
+            elif normalized_level_2 is None:
+                region_level = 2
+                parents = [normalized_level_1]
+                rows = await connection.fetch(
+                    """
+                    SELECT location.region_level_2 AS name,
+                           concat_ws(
+                               ' ',
+                               location.region_level_1,
+                               location.region_level_2
+                           ) AS full_name,
+                           BOOL_OR(location.region_level_3 IS NOT NULL) AS has_children
+                    FROM weather_locations AS location
+                    WHERE location.region_level_1 = $1
+                      AND location.region_level_2 IS NOT NULL
+                    GROUP BY location.region_level_1, location.region_level_2
+                    ORDER BY location.region_level_2 ASC
+                    """,
+                    normalized_level_1,
+                )
+            else:
+                region_level = 3
+                parents = [normalized_level_1, normalized_level_2]
+                rows = await connection.fetch(
+                    """
+                    SELECT location.region_level_3 AS name,
+                           concat_ws(
+                               ' ',
+                               location.region_level_1,
+                               location.region_level_2,
+                               location.region_level_3
+                           ) AS full_name,
+                           FALSE AS has_children
+                    FROM weather_locations AS location
+                    WHERE location.region_level_1 = $1
+                      AND location.region_level_2 = $2
+                      AND location.region_level_3 IS NOT NULL
+                    GROUP BY
+                        location.region_level_1,
+                        location.region_level_2,
+                        location.region_level_3
+                    ORDER BY location.region_level_3 ASC
+                    """,
+                    normalized_level_1,
+                    normalized_level_2,
+                )
+    except DATABASE_ERRORS as exc:
+        raise storage_unavailable("read-locations", exc) from exc
+
+    try:
+        return WeatherLocationCatalogResponse(
+            region_level=region_level,
+            parents=parents,
+            items=[WeatherRegionOptionResponse.model_validate(dict(row)) for row in rows],
+        )
+    except (KeyError, TypeError, ValueError, ValidationError) as exc:
+        raise invalid_stored_data("read-locations", exc) from exc
 
 
 @router.get(

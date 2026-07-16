@@ -23,6 +23,28 @@ Region = Annotated[
         examples=["서울특별시 종로구"],
     ),
 ]
+RegionLevel1 = Annotated[
+    str | None,
+    Query(
+        min_length=1,
+        max_length=100,
+        description=(
+            "2단계 지역 목록을 조회할 공식 1단계 지역명. 생략하면 전국 1단계 목록을 반환합니다."
+        ),
+        examples=["서울특별시"],
+    ),
+]
+RegionLevel2 = Annotated[
+    str | None,
+    Query(
+        min_length=1,
+        max_length=100,
+        description=(
+            "3단계 지역 목록을 조회할 공식 2단계 지역명. region_level_1과 함께 사용합니다."
+        ),
+        examples=["종로구"],
+    ),
+]
 Latitude = Annotated[
     float | None,
     Query(
@@ -73,6 +95,27 @@ class WeatherLocationResponse(BaseModel):
     region_level_1: str = Field(min_length=1, description="시·도 단위 1단계 행정구역명")
     region_level_2: str | None = Field(description="시·군·구 단위 2단계 행정구역명")
     region_level_3: str | None = Field(description="읍·면·동 단위 3단계 행정구역명")
+
+
+class WeatherRegionOptionResponse(BaseModel):
+    name: str = Field(min_length=1, description="현재 단계의 지역명", examples=["종로구"])
+    full_name: str = Field(
+        min_length=1,
+        description="`/weather/forecast`의 region에 그대로 사용할 수 있는 전체 지역명",
+        examples=["서울특별시 종로구"],
+    )
+    has_children: bool = Field(description="다음 단계의 하위 지역이 존재하는지 여부")
+
+
+class WeatherLocationCatalogResponse(BaseModel):
+    region_level: Literal[1, 2, 3] = Field(description="items에 담긴 지역의 행정구역 단계")
+    parents: list[str] = Field(
+        max_length=2,
+        description="현재 목록을 제한한 상위 지역명. 전국 1단계 목록이면 빈 배열입니다.",
+    )
+    items: list[WeatherRegionOptionResponse] = Field(
+        description="이름순으로 정렬된 중복 없는 지역 선택지"
+    )
 
 
 class WeatherValuesResponse(BaseModel):

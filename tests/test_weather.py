@@ -1,12 +1,24 @@
+import asyncio
 import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import asyncpg
 from fastapi import HTTPException
+from redis.exceptions import ConnectionError as RedisConnectionError
 
+from src.weather.cache import (
+    CURRENT_WEATHER_CACHE_KEY,
+    InvalidWeatherCacheData,
+    RedisWeatherCache,
+)
 from src.weather.grid import latitude_longitude_to_grid
-from src.weather.routes import get_nationwide_current_weather, get_weather_forecast
+from src.weather.model import NationwideCurrentWeatherResponse
+from src.weather.routes import (
+    get_nationwide_current_weather,
+    get_weather_forecast,
+    get_weather_locations,
+)
 
 
 class AcquireContext:
@@ -34,6 +46,11 @@ def request_with_pool(pool):
 
 def request_with(connection):
     return request_with_pool(Pool(connection))
+
+
+def request_with_weather(connection, cache):
+    state = SimpleNamespace(pool=Pool(connection), weather_cache=cache)
+    return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
 ISSUED_AT = datetime(2026, 7, 16, 5, 0, tzinfo=UTC)
@@ -86,6 +103,64 @@ def forecast_row(*, forecast_at=FORECAST_AT, nx=60, ny=127):
     }
 
 
+def current_response() -> NationwideCurrentWeatherResponse:
+    return NationwideCurrentWeatherResponse.model_validate(
+        {
+            "generated_at": FORECAST_AT,
+            "items": [
+                location_row()
+                | forecast_row()
+                | {
+                    "grid": {
+                        "nx": 60,
+                        "ny": 127,
+                        "longitude": 126.98935225645432,
+                        "latitude": 37.579871128849334,
+                    },
+                    "sky_status_label": "구름많음",
+                    "precipitation_type_label": "비",
+                }
+            ],
+        }
+    )
+
+
+class FakeRedis:
+    def __init__(self, value=None):
+        self.value = value
+        self.set_calls = []
+
+    async def get(self, key):
+        self.get_key = key
+        return self.value
+
+    async def set(self, key, value, *, ex):
+        self.value = value
+        self.set_calls.append((key, value, ex))
+        return True
+
+
+class FakeWeatherCache:
+    def __init__(self, response=None, *, read_error=None, write_error=None):
+        self.response = response
+        self.read_error = read_error
+        self.write_error = write_error
+        self.read_count = 0
+        self.writes = []
+
+    async def read_current(self):
+        self.read_count += 1
+        if self.read_error is not None:
+            raise self.read_error
+        return self.response
+
+    async def write_current(self, response):
+        if self.write_error is not None:
+            raise self.write_error
+        self.response = response
+        self.writes.append(response)
+
+
 class GridConversionTest(unittest.TestCase):
     def test_converts_seoul_coordinates_with_collector_formula(self):
         self.assertEqual(latitude_longitude_to_grid(37.5704, 126.9816), (60, 127))
@@ -95,6 +170,34 @@ class GridConversionTest(unittest.TestCase):
             with self.subTest(latitude=latitude, longitude=longitude):
                 with self.assertRaises(ValueError):
                     latitude_longitude_to_grid(latitude, longitude)
+
+
+class RedisWeatherCacheTest(unittest.IsolatedAsyncioTestCase):
+    async def test_round_trips_current_response_with_configured_ttl(self):
+        redis = FakeRedis()
+        cache = RedisWeatherCache(redis, current_ttl=123)
+        expected = current_response()
+
+        await cache.write_current(expected)
+        actual = await cache.read_current()
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(redis.get_key, CURRENT_WEATHER_CACHE_KEY)
+        self.assertEqual(redis.set_calls[0][0], CURRENT_WEATHER_CACHE_KEY)
+        self.assertEqual(redis.set_calls[0][2], 123)
+
+    async def test_rejects_cache_payload_outside_response_contract(self):
+        cache = RedisWeatherCache(FakeRedis('{"generated_at":"secret-invalid"}'))
+
+        with self.assertRaises(InvalidWeatherCacheData) as raised:
+            await cache.read_current()
+
+        self.assertNotIn("secret-invalid", str(raised.exception))
+
+    def test_rejects_non_positive_cache_settings(self):
+        for settings in ({"current_ttl": 0}, {"max_payload_bytes": 0}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                RedisWeatherCache(FakeRedis(), **settings)
 
 
 class NationwideCurrentWeatherTest(unittest.IsolatedAsyncioTestCase):
@@ -116,6 +219,90 @@ class NationwideCurrentWeatherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.items[0].forecast_at, FORECAST_AT)
         self.assertEqual(result.items[0].sky_status_label, "구름많음")
         self.assertEqual(result.items[0].precipitation_type_label, "비")
+
+    async def test_caches_database_response_and_reuses_it(self):
+        class Connection:
+            def __init__(self):
+                self.fetch_count = 0
+
+            async def fetch(self, query, *values):
+                self.fetch_count += 1
+                return [location_row() | forecast_row()]
+
+        connection = Connection()
+        cache = FakeWeatherCache()
+        request = request_with_weather(connection, cache)
+
+        first = await get_nationwide_current_weather(request)
+        second = await get_nationwide_current_weather(request)
+
+        self.assertEqual(connection.fetch_count, 1)
+        self.assertEqual(cache.writes, [first])
+        self.assertEqual(second, first)
+
+    async def test_coalesces_concurrent_cache_misses_within_process(self):
+        class Connection:
+            def __init__(self):
+                self.fetch_count = 0
+
+            async def fetch(self, query, *values):
+                self.fetch_count += 1
+                await asyncio.sleep(0)
+                return [location_row() | forecast_row()]
+
+        connection = Connection()
+        cache = FakeWeatherCache()
+        request = request_with_weather(connection, cache)
+
+        results = await asyncio.gather(
+            *(get_nationwide_current_weather(request) for _ in range(5))
+        )
+
+        self.assertEqual(connection.fetch_count, 1)
+        self.assertTrue(all(result == results[0] for result in results))
+
+    async def test_returns_cached_response_without_database_access(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                raise AssertionError("DB를 조회하면 안 됩니다.")
+
+        expected = current_response()
+        result = await get_nationwide_current_weather(
+            request_with_weather(Connection(), FakeWeatherCache(expected))
+        )
+
+        self.assertEqual(result, expected)
+
+    async def test_falls_back_to_database_without_retrying_unavailable_cache(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                return [location_row() | forecast_row()]
+
+        cache = FakeWeatherCache(
+            read_error=RedisConnectionError("redis://user:secret@internal"),
+            write_error=RedisConnectionError("redis://user:secret@internal"),
+        )
+        result = await get_nationwide_current_weather(
+            request_with_weather(Connection(), cache)
+        )
+
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual(cache.read_count, 1)
+        self.assertEqual(cache.writes, [])
+
+    async def test_replaces_invalid_cache_data_with_database_response(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                return [location_row() | forecast_row()]
+
+        cache = FakeWeatherCache(
+            read_error=InvalidWeatherCacheData("secret invalid payload")
+        )
+        result = await get_nationwide_current_weather(
+            request_with_weather(Connection(), cache)
+        )
+
+        self.assertEqual(cache.writes, [result])
 
     async def test_returns_empty_items_when_no_forecasts_are_stored(self):
         class Connection:
@@ -147,6 +334,180 @@ class NationwideCurrentWeatherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn("99", raised.exception.detail)
+
+
+class WeatherLocationsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_distinct_first_level_regions(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                self.query = query
+                self.values = values
+                return [
+                    {
+                        "name": "서울특별시",
+                        "full_name": "서울특별시",
+                        "has_children": True,
+                    },
+                    {
+                        "name": "이어도",
+                        "full_name": "이어도",
+                        "has_children": False,
+                    },
+                ]
+
+        connection = Connection()
+        result = await get_weather_locations(
+            request_with(connection),
+            region_level_1=None,
+            region_level_2=None,
+        )
+
+        self.assertEqual(connection.values, ())
+        self.assertIn("GROUP BY location.region_level_1", connection.query)
+        self.assertIn("ORDER BY location.region_level_1 ASC", connection.query)
+        self.assertEqual(result.region_level, 1)
+        self.assertEqual(result.parents, [])
+        self.assertEqual([item.full_name for item in result.items], ["서울특별시", "이어도"])
+        self.assertFalse(result.items[1].has_children)
+
+    async def test_returns_second_level_regions_for_normalized_alias(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                self.query = query
+                self.values = values
+                return [
+                    {
+                        "name": "전주시 완산구",
+                        "full_name": "전북특별자치도 전주시 완산구",
+                        "has_children": True,
+                    }
+                ]
+
+        connection = Connection()
+        result = await get_weather_locations(
+            request_with(connection),
+            region_level_1="  전북  ",
+            region_level_2=None,
+        )
+
+        self.assertEqual(connection.values, ("전북특별자치도",))
+        self.assertIn("location.region_level_2 IS NOT NULL", connection.query)
+        self.assertEqual(result.region_level, 2)
+        self.assertEqual(result.parents, ["전북특별자치도"])
+        self.assertEqual(result.items[0].name, "전주시 완산구")
+
+    async def test_returns_third_level_regions_with_forecast_ready_full_name(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                self.query = query
+                self.values = values
+                return [
+                    {
+                        "name": "청운효자동",
+                        "full_name": "서울특별시 종로구 청운효자동",
+                        "has_children": False,
+                    },
+                    {
+                        "name": "사직동",
+                        "full_name": "서울특별시 종로구 사직동",
+                        "has_children": False,
+                    },
+                ]
+
+        connection = Connection()
+        result = await get_weather_locations(
+            request_with(connection),
+            region_level_1=" 서울특별시 ",
+            region_level_2=" 종로구 ",
+        )
+
+        self.assertEqual(connection.values, ("서울특별시", "종로구"))
+        self.assertIn("location.region_level_3 IS NOT NULL", connection.query)
+        self.assertEqual(result.region_level, 3)
+        self.assertEqual(result.parents, ["서울특별시", "종로구"])
+        self.assertEqual(result.items[0].full_name, "서울특별시 종로구 청운효자동")
+
+    async def test_supports_current_combined_jeonnam_region_alias(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                self.values = values
+                return []
+
+        connection = Connection()
+        result = await get_weather_locations(
+            request_with(connection),
+            region_level_1="전남",
+            region_level_2=None,
+        )
+
+        self.assertEqual(connection.values, ("전남광주통합특별시",))
+        self.assertEqual(result.parents, ["전남광주통합특별시"])
+        self.assertEqual(result.items, [])
+
+    async def test_rejects_second_level_without_first_level(self):
+        with self.assertRaises(HTTPException) as raised:
+            await get_weather_locations(
+                request_with(None),
+                region_level_1=None,
+                region_level_2="종로구",
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
+
+    async def test_rejects_whitespace_only_parent_without_database_query(self):
+        with self.assertRaises(HTTPException) as raised:
+            await get_weather_locations(
+                request_with(None),
+                region_level_1="   ",
+                region_level_2=None,
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
+
+    async def test_returns_empty_items_for_parent_without_children(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                return []
+
+        result = await get_weather_locations(
+            request_with(Connection()),
+            region_level_1="이어도",
+            region_level_2=None,
+        )
+
+        self.assertEqual(result.region_level, 2)
+        self.assertEqual(result.parents, ["이어도"])
+        self.assertEqual(result.items, [])
+
+    async def test_maps_location_query_failure_to_service_unavailable(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                raise asyncpg.InterfaceError("secret location storage detail")
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_weather_locations(
+                request_with(Connection()),
+                region_level_1=None,
+                region_level_2=None,
+            )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("secret", raised.exception.detail)
+
+    async def test_rejects_invalid_stored_location_option(self):
+        class Connection:
+            async def fetch(self, query, *values):
+                return [{"name": "", "full_name": "secret invalid", "has_children": True}]
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_weather_locations(
+                request_with(Connection()),
+                region_level_1=None,
+                region_level_2=None,
+            )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("secret invalid", raised.exception.detail)
 
 
 class WeatherForecastTest(unittest.IsolatedAsyncioTestCase):
