@@ -242,16 +242,17 @@ class IntelligentSearchEngine:
         import certifi
         import httpx
 
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        api_key = os.getenv("LLM_API_KEY", "").strip()
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is required")
+            raise RuntimeError("LLM_API_KEY is required")
         self._owned_llm_client = AsyncOpenAI(
             api_key=api_key,
+            base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").strip(),
             http_client=httpx.AsyncClient(verify=certifi.where()),
         )
         return OpenAIQueryAnalyzer(
             self._owned_llm_client,
-            model=os.getenv("OPENAI_SEARCH_MODEL", "gpt-4.1-mini"),
+            model=os.getenv("LLM_MODEL", "gpt-4.1-mini"),
         )
 
     async def _search_provider(self, provider_id: str, analysis: QueryAnalysis) -> list[Any]:
