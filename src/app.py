@@ -115,6 +115,8 @@ async def lifespan(app: FastAPI):
         search_publisher = RabbitMQSearchPublisher(
             RabbitMQSettings(
                 host=os.getenv("RABBITMQ_HOST", "localhost"),
+                username=os.getenv("RABBITMQ_USER", "guest"),
+                password=os.getenv("RABBITMQ_PASSWORD", "guest"),
                 port=int(os.getenv("RABBITMQ_PORT", "5672")),
                 virtual_host=os.getenv("RABBITMQ_VHOST", "/"),
                 queue=os.getenv("SEARCH_QUEUE", "saver.search.requests"),
