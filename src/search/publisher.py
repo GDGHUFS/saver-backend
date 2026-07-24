@@ -30,7 +30,22 @@ class RabbitMQSettings:
     username: str
     password: str
     virtual_host: str
-    queue: str
+    exchange: str
+    legacy_queue: str
+    intelligent_queue: str
+
+    def __post_init__(self) -> None:
+        if not all((
+            self.host.strip(),
+            self.username.strip(),
+            self.virtual_host.strip(),
+            self.exchange.strip(),
+            self.legacy_queue.strip(),
+            self.intelligent_queue.strip(),
+        )):
+            raise ValueError("RabbitMQ connection and topology names must not be empty")
+        if self.legacy_queue == self.intelligent_queue:
+            raise ValueError("legacy and intelligent search queues must be different")
 
 
 class RabbitMQSearchPublisher:
@@ -73,7 +88,20 @@ class RabbitMQSearchPublisher:
         )
         self._connection = pika.BlockingConnection(parameters)
         self._channel = self._connection.channel()
-        self._channel.queue_declare(queue=self._settings.queue, durable=True)
+        self._channel.exchange_declare(
+            exchange=self._settings.exchange,
+            exchange_type="fanout",
+            durable=True,
+        )
+        for queue in (
+            self._settings.legacy_queue,
+            self._settings.intelligent_queue,
+        ):
+            self._channel.queue_declare(queue=queue, durable=True)
+            self._channel.queue_bind(
+                exchange=self._settings.exchange,
+                queue=queue,
+            )
         self._channel.confirm_delivery()
 
     async def _heartbeat_loop(self) -> None:
@@ -120,8 +148,8 @@ class RabbitMQSearchPublisher:
                 # confirm_delivery 모드에서는 ACK가 오면 None을 반환하고 NACK 또는
                 # unroutable 결과는 예외로 전달된다. 반환값의 truthiness를 검사하면 안 된다.
                 self._channel.basic_publish(
-                    exchange="",
-                    routing_key=self._settings.queue,
+                    exchange=self._settings.exchange,
+                    routing_key="",
                     body=body,
                     properties=properties,
                     mandatory=True,

@@ -29,9 +29,11 @@ RABBITMQ_PORT=5672
 RABBITMQ_USER=guest
 RABBITMQ_PASSWORD=guest
 RABBITMQ_VHOST=/
-SEARCH_QUEUE=saver.search.requests
-SEARCH_MAGIC_CODE_TTL=60
-SEARCH_QUERY_TTL=180
+SEARCH_EXCHANGE=saver.search.requested.v1
+SEARCH_LEGACY_QUEUE=saver.search.legacy.requests
+SEARCH_INTELLIGENT_QUEUE=saver.search.intelligent.requests
+SEARCH_MAGIC_CODE_TTL=300
+SEARCH_QUERY_TTL=600
 SEARCH_RATE_LIMIT_MAX=10
 SEARCH_RATE_LIMIT_WINDOW=60
 # 검색어의 외부 전송 정책을 확인한 뒤 worker 실행 환경에서만 true로 설정
@@ -99,9 +101,16 @@ Application startup complete.
 
 브라우저에서 `http://localhost:5050/`을 열어 `Hello World` 응답을 확인할 수 있다.
 
-## 4. Python 검색 worker 시작
+## 4. 두 검색 worker 시작
 
-새 터미널 2에서 실행한다.
+기존 `saver-search` worker에는 다음처럼 legacy queue를 설정한다.
+
+```dotenv
+SEARCH_QUEUE=saver.search.legacy.requests
+SEARCH_QUERY_TTL=600
+```
+
+이 저장소의 intelligent worker는 새 터미널에서 실행한다.
 
 ```bash
 cd ~/projects/saver/saver-backend
@@ -114,7 +123,7 @@ python -m src.search.worker
 다음 로그가 나오면 RabbitMQ 검색 작업을 받을 준비가 된 것이다.
 
 ```text
-Search worker is consuming queue saver.search.requests
+Search worker is consuming queue saver.search.intelligent.requests
 ```
 
 worker는 FastAPI 요청 프로세스와 분리되어 동작한다.
@@ -125,16 +134,17 @@ worker는 FastAPI 요청 프로세스와 분리되어 동작한다.
 ```text
 frontend 검색 요청
 → backend가 Redis 상태 생성
-→ backend가 RabbitMQ에 명령 발행
-→ Python worker가 지능형 검색 실행
-→ worker가 Redis에 결과 저장
-→ frontend polling 요청에 backend가 Redis 결과 반환
+→ backend가 RabbitMQ fanout exchange에 명령 한 번 발행
+→ legacy와 intelligent queue가 메시지를 각각 한 부씩 수신
+→ 두 worker가 분리된 Redis key에 결과 저장
+→ frontend polling 요청에 backend가 두 상태와 결과를 함께 반환
 ```
 
-backend만 실행하고 worker를 실행하지 않으면 검색 상태는 `PENDING`으로 남다가 TTL 이후 만료될 수 있다.
+worker 하나가 실행되지 않으면 해당 분기는 `PENDING`으로 남고 전체 조회는 계속 `202`를 반환하다가
+magicCode TTL 이후 만료될 수 있다.
 
-완료 응답의 `result.answer`에는 아래 CLI가 출력하는 것과 같은 최종 답변이 들어가고,
-`result.data.search`에는 답변의 검색 근거가 들어간다. 로그인한 브라우저에서
+완료 응답의 `results.intelligent.result.answer`에는 아래 CLI가 출력하는 것과 같은 최종 답변이,
+`results.legacy.result`에는 기존 `saver-search` 결과가 들어간다. 로그인한 브라우저에서
 `http://localhost:5050/docs`를 열어 `POST /search`로 발급받은 `magicCode`를
 `GET /search/{magic_code}`에 입력하면 이 비동기 흐름을 직접 확인할 수 있다.
 

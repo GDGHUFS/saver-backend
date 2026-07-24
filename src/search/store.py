@@ -3,36 +3,51 @@ import hmac
 import json
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
-from src.search.model import KagiSearchResponse
+from src.search.model import IntelligentSearchResponse, KagiSearchResponse
 
 
 TICKET_PREFIX = "saver:search:ticket:"
 QUERY_PREFIX = "saver:search:query:"
+INTELLIGENT_QUERY_SUFFIX = ":intelligent"
 QUERY_KEY_PATTERN = re.compile(r"^saver:search:query:[0-9a-f]{64}$")
+INTELLIGENT_QUERY_KEY_PATTERN = re.compile(
+    r"^saver:search:query:[0-9a-f]{64}:intelligent$"
+)
 VALID_STATUSES = frozenset({"PENDING", "COMPLETED", "FAILED"})
 RATE_LIMIT_PREFIX = "saver:search:rate:"
 
 
 CREATE_TICKET_SCRIPT = """
-local query_status = redis.call('HGET', KEYS[2], 'status')
-local has_result = redis.call('HEXISTS', KEYS[2], 'result')
-local should_publish = 1
+local legacy_status = redis.call('HGET', KEYS[2], 'status')
+local legacy_has_result = redis.call('HEXISTS', KEYS[2], 'result')
+local intelligent_status = redis.call('HGET', KEYS[3], 'status')
+local intelligent_has_result = redis.call('HEXISTS', KEYS[3], 'result')
 
-if query_status == 'COMPLETED' and has_result == 1 then
-    should_publish = 0
-else
+local legacy_completed = legacy_status == 'COMPLETED' and legacy_has_result == 1
+local intelligent_completed =
+    intelligent_status == 'COMPLETED' and intelligent_has_result == 1
+local should_publish = (legacy_completed and intelligent_completed) and 0 or 1
+
+if not legacy_completed then
     redis.call('HSET', KEYS[2], 'status', 'PENDING')
     redis.call('HDEL', KEYS[2], 'result', 'error_code')
 end
+if not intelligent_completed then
+    redis.call('HSET', KEYS[3], 'status', 'PENDING')
+    redis.call('HDEL', KEYS[3], 'result', 'error_code')
+end
 
 redis.call('EXPIRE', KEYS[2], ARGV[2])
+redis.call('EXPIRE', KEYS[3], ARGV[2])
 redis.call('HSET', KEYS[1],
     'status', should_publish == 0 and 'COMPLETED' or 'PENDING',
-    'query_key', KEYS[2])
+    'query_key', KEYS[2],
+    'intelligent_query_key', KEYS[3])
 redis.call('EXPIRE', KEYS[1], ARGV[1])
 return should_publish
 """
@@ -61,9 +76,21 @@ class InvalidSearchData(ValueError):
 
 
 @dataclass(frozen=True)
-class SearchState:
+class LegacySearchState:
     status: str
     result: KagiSearchResponse | None = None
+
+
+@dataclass(frozen=True)
+class IntelligentSearchState:
+    status: str
+    result: IntelligentSearchResponse | None = None
+
+
+@dataclass(frozen=True)
+class SearchState:
+    legacy: LegacySearchState
+    intelligent: IntelligentSearchState
 
 
 class RedisSearchStore:
@@ -71,8 +98,8 @@ class RedisSearchStore:
         self,
         redis: Redis,
         *,
-        ticket_ttl: int = 60,
-        query_ttl: int = 180,
+        ticket_ttl: int = 300,
+        query_ttl: int = 600,
         max_result_bytes: int = 2_000_000,
         rate_limit_secret: str | None = None,
         submission_limit: int = 10,
@@ -106,6 +133,10 @@ class RedisSearchStore:
     def query_key(query_hash: str) -> str:
         return f"{QUERY_PREFIX}{query_hash}"
 
+    @staticmethod
+    def intelligent_query_key(query_hash: str) -> str:
+        return f"{QUERY_PREFIX}{query_hash}{INTELLIGENT_QUERY_SUFFIX}"
+
     def rate_limit_key(self, user_id: int) -> str:
         if self._rate_limit_secret is None:
             raise RuntimeError("search rate limit secret is not configured")
@@ -130,9 +161,10 @@ class RedisSearchStore:
     async def create_ticket(self, magic_code: str, query_hash: str) -> bool:
         result = await self._redis.eval(
             CREATE_TICKET_SCRIPT,
-            2,
+            3,
             self.ticket_key(magic_code),
             self.query_key(query_hash),
+            self.intelligent_query_key(query_hash),
             self.ticket_ttl,
             self.query_ttl,
         )
@@ -158,27 +190,67 @@ class RedisSearchStore:
 
         ticket_status = ticket.get("status")
         query_key = ticket.get("query_key")
-        if ticket_status not in VALID_STATUSES or not isinstance(query_key, str):
+        intelligent_query_key = ticket.get("intelligent_query_key")
+        if (
+            ticket_status not in VALID_STATUSES
+            or not isinstance(query_key, str)
+            or not isinstance(intelligent_query_key, str)
+        ):
             raise InvalidSearchData("invalid search ticket")
         if not QUERY_KEY_PATTERN.fullmatch(query_key):
-            raise InvalidSearchData("invalid query key")
+            raise InvalidSearchData("invalid legacy query key")
+        if not INTELLIGENT_QUERY_KEY_PATTERN.fullmatch(intelligent_query_key):
+            raise InvalidSearchData("invalid intelligent query key")
+        if intelligent_query_key != f"{query_key}{INTELLIGENT_QUERY_SUFFIX}":
+            raise InvalidSearchData("search query keys do not match")
         if ticket_status == "FAILED":
-            return SearchState(status="FAILED")
+            return SearchState(
+                legacy=LegacySearchState(status="FAILED"),
+                intelligent=IntelligentSearchState(status="FAILED"),
+            )
 
-        query = await self._redis.hgetall(query_key)
+        legacy_query = await self._redis.hgetall(query_key)
+        intelligent_query = await self._redis.hgetall(intelligent_query_key)
+        legacy_status, legacy_result = self._validated_query_state(
+            legacy_query,
+            KagiSearchResponse,
+            "legacy",
+        )
+        intelligent_status, intelligent_result = self._validated_query_state(
+            intelligent_query,
+            IntelligentSearchResponse,
+            "intelligent",
+        )
+        return SearchState(
+            legacy=LegacySearchState(
+                status=legacy_status,
+                result=legacy_result,
+            ),
+            intelligent=IntelligentSearchState(
+                status=intelligent_status,
+                result=intelligent_result,
+            ),
+        )
+
+    def _validated_query_state(
+        self,
+        query: dict[str, str],
+        response_model: type[KagiSearchResponse],
+        branch: str,
+    ) -> tuple[str, Any]:
         if not query:
-            return SearchState(status="PENDING")
+            return "PENDING", None
         query_status = query.get("status")
         if query_status not in VALID_STATUSES:
-            raise InvalidSearchData("invalid query status")
+            raise InvalidSearchData(f"invalid {branch} query status")
         if query_status != "COMPLETED":
-            return SearchState(status=query_status)
+            return query_status, None
 
         raw_result = query.get("result")
         if not isinstance(raw_result, str):
-            raise InvalidSearchData("completed search has no result")
+            raise InvalidSearchData(f"completed {branch} search has no result")
         if len(raw_result.encode("utf-8")) > self.max_result_bytes:
-            raise InvalidSearchData("search result is too large")
+            raise InvalidSearchData(f"{branch} search result is too large")
         try:
             decoded_result = json.loads(
                 raw_result,
@@ -186,7 +258,9 @@ class RedisSearchStore:
                     ValueError(f"invalid JSON constant: {value}")
                 ),
             )
-            result = KagiSearchResponse.model_validate(decoded_result)
+            result = response_model.model_validate(decoded_result)
         except (TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
-            raise InvalidSearchData("search result does not match the Kagi contract") from exc
-        return SearchState(status="COMPLETED", result=result)
+            raise InvalidSearchData(
+                f"{branch} search result does not match its contract"
+            ) from exc
+        return "COMPLETED", result

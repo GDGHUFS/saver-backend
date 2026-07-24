@@ -18,12 +18,13 @@ from dotenv import load_dotenv
 from src.search.engine import IntelligentSearchEngine
 from src.search.engine.answer import generate_answer
 from src.search.engine.config import LLMSettings, boolean_from_env
-from src.search.model import KagiSearchResponse
+from src.search.model import IntelligentSearchResponse
 
 
 MAX_COMMAND_BYTES = 4_096
 MAGIC_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 QUERY_PREFIX = "saver:search:query:"
+INTELLIGENT_QUERY_SUFFIX = ":intelligent"
 TICKET_PREFIX = "saver:search:ticket:"
 
 COMPLETE_QUERY_SCRIPT = """
@@ -80,12 +81,15 @@ class WorkerSettings:
             rabbitmq_user=os.getenv("RABBITMQ_USER", "guest"),
             rabbitmq_password=os.getenv("RABBITMQ_PASSWORD", "guest"),
             rabbitmq_vhost=os.getenv("RABBITMQ_VHOST", "/"),
-            queue=os.getenv("SEARCH_QUEUE", "saver.search.requests"),
+            queue=os.getenv(
+                "SEARCH_INTELLIGENT_QUEUE",
+                "saver.search.intelligent.requests",
+            ),
             redis_host=os.getenv("REDIS_HOST", "localhost"),
             redis_port=int(os.getenv("REDIS_PORT", "6379")),
             redis_db=int(os.getenv("REDIS_DB", "0")),
             redis_password=os.getenv("REDIS_PASSWORD") or None,
-            result_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
+            result_ttl=int(os.getenv("SEARCH_QUERY_TTL", "600")),
         )
 
 
@@ -144,7 +148,7 @@ async def _search_result(engine: IntelligentSearchEngine, query: str) -> str:
         },
         "meta": {"ms": elapsed_ms},
     }
-    return KagiSearchResponse.model_validate(payload).to_result_json()
+    return IntelligentSearchResponse.model_validate(payload).to_result_json()
 
 
 class SearchWorker:
@@ -176,12 +180,14 @@ class SearchWorker:
         self,
         command: dict[str, str],
     ) -> Literal["PENDING", "COMPLETED"]:
-        query_key = f"{QUERY_PREFIX}{command['query_hash']}"
+        legacy_query_key = f"{QUERY_PREFIX}{command['query_hash']}"
+        query_key = f"{legacy_query_key}{INTELLIGENT_QUERY_SUFFIX}"
         ticket = self.redis.hgetall(f"{TICKET_PREFIX}{command['magic_code']}")
         query = self.redis.hgetall(query_key)
         if (
             ticket.get("status") != "PENDING"
-            or ticket.get("query_key") != query_key
+            or ticket.get("query_key") != legacy_query_key
+            or ticket.get("intelligent_query_key") != query_key
         ):
             raise ValueError("search command has no matching ticket")
         query_status = query.get("status")
@@ -256,7 +262,10 @@ class SearchWorker:
             channel.basic_reject(delivery_tag=method.delivery_tag, requeue=False)
             return
 
-        query_key = f"{QUERY_PREFIX}{command['query_hash']}"
+        query_key = (
+            f"{QUERY_PREFIX}{command['query_hash']}"
+            f"{INTELLIGENT_QUERY_SUFFIX}"
+        )
         try:
             command_state = self._command_state(command)
         except ValueError:
@@ -267,9 +276,14 @@ class SearchWorker:
             return
 
         if command_state == "COMPLETED":
+            print(
+                "Search intelligent cache hit "
+                f"job={command['query_hash'][:12]}"
+            )
             channel.basic_ack(delivery_tag=method.delivery_tag)
             return
 
+        print(f"Search intelligent job received job={command['query_hash'][:12]}")
         try:
             result = self._event_loop.run_until_complete(
                 _search_result(self.engine, command["query"])
@@ -284,8 +298,10 @@ class SearchWorker:
             except redis.exceptions.RedisError:
                 channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                 return
+            print(f"Search intelligent job failed job={command['query_hash'][:12]}")
             channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
             return
+        print(f"Search intelligent job completed job={command['query_hash'][:12]}")
         channel.basic_ack(delivery_tag=method.delivery_tag)
 
 

@@ -3,7 +3,7 @@ import unittest
 
 from src.search.engine.answer import generate_answer
 from src.search.engine.schema import SearchCandidate, SearchResponse, SourceType
-from src.search.model import KagiSearchResponse
+from src.search.model import IntelligentSearchResponse
 from src.search.worker import _search_result
 
 
@@ -48,7 +48,7 @@ class SearchAnswerTest(unittest.IsolatedAsyncioTestCase):
 
         raw_result = await _search_result(FakeEngine(response), "질문")
         payload = json.loads(raw_result)
-        validated = KagiSearchResponse.model_validate(payload)
+        validated = IntelligentSearchResponse.model_validate(payload)
 
         self.assertEqual(validated.answer, "CLI와 웹에서 공유할 답변")
         self.assertEqual(

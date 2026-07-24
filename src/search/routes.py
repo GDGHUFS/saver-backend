@@ -11,10 +11,12 @@ from redis.exceptions import ResponseError, TimeoutError as RedisTimeoutError
 
 from src.auth import get_current_user_id
 from src.search.model import (
+    IntelligentSearchBranchResponse,
+    LegacySearchBranchResponse,
     SearchAcceptedResponse,
-    SearchPendingResponse,
     SearchRequest,
     SearchResultResponse,
+    SearchResultsResponse,
 )
 from src.search.publisher import SearchPublishError
 from src.search.store import InvalidSearchData
@@ -58,7 +60,8 @@ def storage_unavailable(operation: str, exc: BaseException) -> HTTPException:
     summary="검색 작업 접수",
     description=(
         "로그인한 사용자의 검색어를 정규화해 Redis에 짧은 수명의 검색 상태를 만들고 magicCode를 발급합니다. "
-        "Redis에 완료된 동일 검색 결과가 없을 때만 RabbitMQ에 검색 명령을 발행하며, "
+        "Redis에 legacy와 intelligent 결과가 모두 완료되어 있지 않을 때 durable fanout exchange에 "
+        "검색 명령을 한 번 발행하며, "
         "외부 검색 결과를 이 응답에 포함하지 않습니다. 사용자 ID는 검색 데이터에 저장하지 않습니다."
     ),
     responses={
@@ -147,15 +150,21 @@ async def submit_search(
     response_model_by_alias=True,
     summary="검색 상태 및 결과 조회",
     description=(
-        "로그인한 사용자가 magicCode로 Redis 상태를 확인합니다. 처리 중이면 202, 완료된 경우 Redis의 "
-        "최종 답변(`result.answer`)과 검색 근거를 200으로 반환하고 사용한 magicCode를 삭제합니다. "
-        "이 API는 외부 검색 호출이나 RabbitMQ 발행을 수행하지 않습니다."
+        "로그인한 사용자가 magicCode로 legacy 및 intelligent 검색 상태를 함께 확인합니다. "
+        "하나라도 처리 중이면 준비된 결과를 포함해 202를 반환합니다. 두 작업이 모두 종료되면 "
+        "COMPLETED 또는 PARTIAL 상태와 함께 200을 반환하고 magicCode를 삭제합니다. "
+        "두 작업이 모두 실패하면 502를 반환합니다. 이 API는 외부 검색 호출이나 RabbitMQ 발행을 "
+        "수행하지 않습니다."
     ),
     responses={
-        200: {"description": "Redis에 저장된 최종 답변과 검색 근거가 반환됨"},
+        200: {
+            "description": (
+                "두 작업이 종료되어 COMPLETED 또는 PARTIAL 결과가 반환됨"
+            )
+        },
         202: {
-            "description": "검색 작업이 아직 처리 중임",
-            "model": SearchPendingResponse,
+            "description": "하나 이상의 검색 작업이 처리 중이며 준비된 결과도 함께 반환됨",
+            "model": SearchResultResponse,
         },
         401: {"description": "로그인 세션이 없거나 유효하지 않음"},
         404: {"description": "magicCode가 없거나 만료됨"},
@@ -185,26 +194,64 @@ async def get_search_result(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="검색 작업을 찾을 수 없거나 magicCode가 만료되었습니다.",
         )
-    if search_state.status == "PENDING":
-        content = SearchPendingResponse(magicCode=magic_code).model_dump(by_alias=True)
-        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=content)
-    if search_state.status == "FAILED":
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="검색 작업을 완료하지 못했습니다.",
-        )
-    if search_state.status != "COMPLETED":
+    branch_statuses = {
+        search_state.legacy.status,
+        search_state.intelligent.status,
+    }
+    if not branch_statuses.issubset({"PENDING", "COMPLETED", "FAILED"}):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="검색 상태를 처리할 수 없습니다.",
         )
-    if search_state.result is None:
+    if (
+        search_state.legacy.status == "COMPLETED"
+        and search_state.legacy.result is None
+    ) or (
+        search_state.intelligent.status == "COMPLETED"
+        and search_state.intelligent.result is None
+    ):
         logger.error("Search data contract violation (MissingCompletedResult)")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="검색 결과를 처리할 수 없습니다.",
         )
-    response = SearchResultResponse(magicCode=magic_code, result=search_state.result)
+
+    response_results = SearchResultsResponse(
+        legacy=LegacySearchBranchResponse(
+            status=search_state.legacy.status,
+            result=search_state.legacy.result,
+        ),
+        intelligent=IntelligentSearchBranchResponse(
+            status=search_state.intelligent.status,
+            result=search_state.intelligent.result,
+        ),
+    )
+    if "PENDING" in branch_statuses:
+        response = SearchResultResponse(
+            magicCode=magic_code,
+            status="PENDING",
+            results=response_results,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=response.model_dump(by_alias=True, mode="json"),
+        )
+    if branch_statuses == {"FAILED"}:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="두 검색 작업을 모두 완료하지 못했습니다.",
+        )
+
+    overall_status = (
+        "COMPLETED"
+        if branch_statuses == {"COMPLETED"}
+        else "PARTIAL"
+    )
+    response = SearchResultResponse(
+        magicCode=magic_code,
+        status=overall_status,
+        results=response_results,
+    )
     try:
         deleted = await request.app.state.search_store.delete_ticket(magic_code)
     except REDIS_ERRORS as exc:

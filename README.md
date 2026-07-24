@@ -7,27 +7,29 @@
 ## 검색 API
 
 - `POST /search`: 로그인 사용자의 `{"query": "..."}`를 받아 `202`와 `magicCode`를 반환한다.
-- `GET /search/{magicCode}`: 로그인 상태를 확인하고, 처리 중에는 `202`, 완료 시에는
-  CLI와 동일한 최종 답변을 `result.answer`에, 검색 근거를 `result.data.search`에 담아
-  `200`으로 반환한 뒤 사용한 `magicCode`를 삭제한다.
+- `GET /search/{magicCode}`: legacy와 intelligent 검색을 함께 조회한다. 하나라도 처리 중이면
+  준비된 결과를 포함한 `202`, 둘 다 종료되면 `COMPLETED` 또는 `PARTIAL` 상태의 `200`을 반환한 뒤
+  사용한 `magicCode`를 삭제한다. 둘 다 실패하면 `502`를 반환한다.
 
 두 API 모두 유효한 Saver 세션 쿠키와 해당 사용자의 DB 행이 필요하다. 인증된 사용자 ID 원문은
 Redis 검색 상태 또는 RabbitMQ 메시지에 연결하거나 저장하지 않는다. 검색 접수 남용 방지를 위해
 세션 비밀값으로 HMAC 처리한 비가역 식별자만 별도 rate-limit 키에 사용한다.
 
-검색 상태의 유일한 원천은 Redis다. 동일한 정규화 검색어의 완료 결과가 Redis에 있으면
-RabbitMQ 발행을 생략하며, 결과가 없으면 durable queue에 persistent 메시지를 publisher confirm과
-함께 발행한다. 조회 API는 RabbitMQ 또는 외부 검색 API를 호출하지 않는다.
+검색 상태의 유일한 원천은 Redis다. 두 결과가 모두 캐시되어 있으면 RabbitMQ 발행을 생략한다.
+하나라도 없으면 durable fanout exchange에 persistent 메시지를 한 번 발행하며, broker가 legacy와
+intelligent 전용 durable queue에 각각 한 부씩 전달한다. 이미 완료된 결과를 가진 worker는 메시지를
+멱등적으로 ACK한다. 조회 API는 RabbitMQ 또는 외부 검색 API를 호출하지 않는다.
 
 기본 키와 TTL은 다음과 같다.
 
-- `saver:search:ticket:{magicCode}`: hash, 기본 TTL 60초, 필드 `status`, `query_key`
-- `saver:search:query:{sha256}`: hash, 기본 TTL 180초, 필드 `status`, 완료 시 `result`
+- `saver:search:ticket:{magicCode}`: hash, 기본 TTL 300초, 필드 `status`, `query_key`,
+  `intelligent_query_key`
+- `saver:search:query:{sha256}`: legacy worker 상태와 결과, 기본 TTL 600초
+- `saver:search:query:{sha256}:intelligent`: intelligent worker 상태와 결과, 기본 TTL 600초
 - `saver:search:rate:{hmac}`: 사용자별 검색 접수 횟수, 기본 60초
 
-상태는 `PENDING`, `COMPLETED`, `FAILED` 중 하나다. `result`는 UTF-8 JSON 문자열이어야 하며,
-새 worker는 최상위 `answer`에 최종 답변을 저장한다. 배포 전 생성되어 TTL 동안 남아 있는 결과와의
-호환성을 위해 API에서 `answer`는 선택 필드다.
+각 작업 상태는 `PENDING`, `COMPLETED`, `FAILED` 중 하나다. legacy 결과는 기존 Kagi 계약을
+유지하고, intelligent 결과는 필수 `answer`와 검색 근거를 포함한다.
 
 완료 응답 예시는 다음과 같다.
 
@@ -35,24 +37,35 @@ RabbitMQ 발행을 생략하며, 결과가 없으면 durable queue에 persistent
 {
   "magicCode": "발급받은 magicCode",
   "status": "COMPLETED",
-  "result": {
-    "answer": "검색 근거를 바탕으로 생성한 최종 답변",
-    "data": {
-      "related_search": [],
-      "search": [
-        {
-          "url": "https://example.com/source",
-          "title": "검색 근거",
-          "snippet": "근거 요약"
-        }
-      ]
+  "results": {
+    "legacy": {
+      "status": "COMPLETED",
+      "result": {
+        "data": {"related_search": [], "search": []},
+        "meta": {"ms": 320}
+      }
     },
-    "meta": {"ms": 1234}
+    "intelligent": {
+      "status": "COMPLETED",
+      "result": {
+        "answer": "검색 근거를 바탕으로 생성한 최종 답변",
+        "data": {"related_search": [], "search": []},
+        "meta": {"ms": 1234}
+      }
+    }
   }
 }
 ```
 
-외부 검색 작업자는 기본 queue `saver.search.requests`에서 아래 메시지를 소비한다.
+기본 RabbitMQ topology는 다음과 같다.
+
+- fanout exchange: `saver.search.requested.v1`
+- legacy queue: `saver.search.legacy.requests`
+- intelligent queue: `saver.search.intelligent.requests`
+
+기존 `saver-search` worker의 `SEARCH_QUEUE`는 legacy queue와 같게 설정하고, 이 저장소의
+`src.search.worker`는 `SEARCH_INTELLIGENT_QUEUE`를 사용한다. 두 queue는 아래와 같은 메시지를
+각각 한 부씩 받는다.
 
 ```json
 {
@@ -65,13 +78,15 @@ RabbitMQ 발행을 생략하며, 결과가 없으면 durable queue에 persistent
 ```
 
 `jobId`는 동일 검색어 재발행 시에도 같으므로 작업자는 이를 기준으로 중복 처리를 안전하게 해야 한다.
-Redis 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 query hash의 `status`와 `result`를
-각각 `COMPLETED` 및 JSON 문자열로 저장한다. 실패 시 query hash 상태를 `FAILED`로 저장할 수 있다.
+각 worker는 자신의 Redis key 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 해당 key의
+`status`와 `result`를 각각 `COMPLETED` 및 JSON 문자열로 저장한다. 실패 시 자신의 상태만
+`FAILED`로 저장한다.
 
 연결과 TTL은 `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, 선택적인 `REDIS_PASSWORD`, `RABBITMQ_HOST`,
-`RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`, `SEARCH_QUEUE`,
-`SEARCH_MAGIC_CODE_TTL`, `SEARCH_QUERY_TTL`, `SEARCH_RATE_LIMIT_MAX`,
-`SEARCH_RATE_LIMIT_WINDOW` 환경 변수로 설정한다. 기본 검색 접수 제한은 사용자별 60초당 10회다.
+`RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`, `SEARCH_EXCHANGE`,
+`SEARCH_LEGACY_QUEUE`, `SEARCH_INTELLIGENT_QUEUE`, `SEARCH_MAGIC_CODE_TTL`, `SEARCH_QUERY_TTL`,
+`SEARCH_RATE_LIMIT_MAX`, `SEARCH_RATE_LIMIT_WINDOW` 환경 변수로 설정한다. 기본 검색 접수 제한은
+사용자별 60초당 10회다.
 
 ## 날씨 API
 
@@ -145,7 +160,23 @@ Redis가 비공개 컨테이너 네트워크에서 인증 없이 동작한다면
 웹 배포에서는 같은 이미지로 두 프로세스를 실행한다. HTTP 서비스는 이미지의 기본 command를 사용하고,
 검색 worker 서비스는 command를 `python -m src.search.worker`로 덮어쓴다. 두 프로세스에는 같은
 Redis·RabbitMQ 설정을 주입하고, 외부 API 키와 `SEARCH_EXTERNAL_PROCESSING_ENABLED=true`는
-검색 worker에만 주입한다. worker가 없으면 `POST /search`는 접수되더라도 결과가 완성되지 않는다.
+검색 worker에만 주입한다. 기존 `saver-search`에는 `SEARCH_QUEUE`를 backend의
+`SEARCH_LEGACY_QUEUE`와 같은 값으로 주입한다. 두 worker 중 하나가 없으면 해당 분기는 `PENDING`으로
+남고 조회 응답은 `202`를 유지하므로, 두 queue의 consumer 수와 적체량을 함께 감시해야 한다.
+
+임시 비교 구성을 배포할 때는 다음 순서를 권장한다.
+
+1. 기존 `saver-search`를 `SEARCH_QUEUE=saver.search.legacy.requests`로 재기동한다.
+2. 이 이미지의 `python -m src.search.worker` 프로세스를
+   `SEARCH_INTELLIGENT_QUEUE=saver.search.intelligent.requests`로 기동한다.
+3. 마지막으로 HTTP backend를 새 exchange·queue 설정으로 배포한다. backend 시작 과정이 exchange,
+   두 queue와 binding을 모두 선언한다.
+4. 두 queue의 consumer가 각각 1명인지와 `messages_ready`, `messages_unacknowledged`를 확인한다.
+
+이 변경 전 backend worker가 기본 query key에 저장한 캐시는 legacy 결과와 구분할 수 없다.
+배포 시 기존 query TTL이 끝날 때까지 기다리거나, 영향 범위를 확인한 뒤 해당
+`saver:search:query:{sha256}` key만 선별적으로 제거한다. Redis 전체 초기화는 하지 않는다.
+Frontend 응답 경로도 기존 `result`에서 `results.legacy`와 `results.intelligent`로 변경해야 한다.
 
 TODO: 운영 동시성 기준을 정한 뒤 Gunicorn과 `uvicorn.workers.UvicornWorker`를 사용하는 다중 worker
 구성으로 전환한다. 현재 이미지는 Uvicorn 단일 프로세스로 실행한다.

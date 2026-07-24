@@ -102,8 +102,8 @@ async def lifespan(app: FastAPI):
         app.state.redis = redis_client
         app.state.search_store = RedisSearchStore(
             redis_client,
-            ticket_ttl=int(os.getenv("SEARCH_MAGIC_CODE_TTL", "60")),
-            query_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
+            ticket_ttl=int(os.getenv("SEARCH_MAGIC_CODE_TTL", "300")),
+            query_ttl=int(os.getenv("SEARCH_QUERY_TTL", "600")),
             rate_limit_secret=session_secret,
             submission_limit=int(os.getenv("SEARCH_RATE_LIMIT_MAX", "10")),
             rate_limit_window=int(os.getenv("SEARCH_RATE_LIMIT_WINDOW", "60")),
@@ -120,7 +120,18 @@ async def lifespan(app: FastAPI):
                 password=os.getenv("RABBITMQ_PASSWORD", "guest"),
                 port=int(os.getenv("RABBITMQ_PORT", "5672")),
                 virtual_host=os.getenv("RABBITMQ_VHOST", "/"),
-                queue=os.getenv("SEARCH_QUEUE", "saver.search.requests"),
+                exchange=os.getenv(
+                    "SEARCH_EXCHANGE",
+                    "saver.search.requested.v1",
+                ),
+                legacy_queue=os.getenv(
+                    "SEARCH_LEGACY_QUEUE",
+                    "saver.search.legacy.requests",
+                ),
+                intelligent_queue=os.getenv(
+                    "SEARCH_INTELLIGENT_QUEUE",
+                    "saver.search.intelligent.requests",
+                ),
             )
         )
         await search_publisher.start()

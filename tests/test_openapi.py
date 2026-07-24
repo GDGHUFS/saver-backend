@@ -86,12 +86,16 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(result["security"], [{"APIKeyCookie": []}])
         result_schema = schema["components"]["schemas"]["SearchResultResponse"]
         self.assertEqual(
-            result_schema["properties"]["result"]["$ref"],
-            "#/components/schemas/KagiSearchResponse",
+            result_schema["properties"]["results"]["$ref"],
+            "#/components/schemas/SearchResultsResponse",
         )
-        worker_result_schema = schema["components"]["schemas"]["KagiSearchResponse"]
-        self.assertIn("answer", worker_result_schema["properties"])
-        self.assertNotIn("answer", worker_result_schema["required"])
+        results_schema = schema["components"]["schemas"]["SearchResultsResponse"]
+        self.assertEqual(set(results_schema["properties"]), {"legacy", "intelligent"})
+        intelligent_schema = schema["components"]["schemas"][
+            "IntelligentSearchResponse"
+        ]
+        self.assertIn("answer", intelligent_schema["properties"])
+        self.assertIn("answer", intelligent_schema["required"])
 
     def test_news_endpoint_documents_public_filtered_read(self):
         schema = app.openapi()

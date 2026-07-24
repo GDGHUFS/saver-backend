@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -28,13 +30,6 @@ class SearchAcceptedResponse(BaseModel):
         examples=["Y6hQTcAkFjC4vAGscR5J0bnYKtD-_osRYVQ97tL7u5I"],
     )
     status: str = Field(default="PENDING", description="접수 시점의 검색 상태")
-
-
-class SearchPendingResponse(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    magic_code: str = Field(alias="magicCode")
-    status: str = Field(default="PENDING")
 
 
 class KagiRelatedSearch(BaseModel):
@@ -73,15 +68,6 @@ class KagiSearchMeta(BaseModel):
 class KagiSearchResponse(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
-    answer: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=20_000,
-        description=(
-            "검색 결과를 근거로 worker가 생성한 최종 답변. "
-            "이 필드 도입 전에 캐시된 결과에는 없을 수 있습니다."
-        ),
-    )
     data: KagiSearchData
     meta: KagiSearchMeta
 
@@ -89,11 +75,34 @@ class KagiSearchResponse(BaseModel):
         return self.model_dump_json(exclude_none=True)
 
 
+class IntelligentSearchResponse(KagiSearchResponse):
+    answer: str = Field(
+        min_length=1,
+        max_length=20_000,
+        description="검색 결과를 근거로 intelligent worker가 생성한 최종 답변",
+    )
+
+
+class LegacySearchBranchResponse(BaseModel):
+    status: Literal["PENDING", "COMPLETED", "FAILED"]
+    result: KagiSearchResponse | None = None
+
+
+class IntelligentSearchBranchResponse(BaseModel):
+    status: Literal["PENDING", "COMPLETED", "FAILED"]
+    result: IntelligentSearchResponse | None = None
+
+
+class SearchResultsResponse(BaseModel):
+    legacy: LegacySearchBranchResponse
+    intelligent: IntelligentSearchBranchResponse
+
+
 class SearchResultResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     magic_code: str = Field(alias="magicCode")
-    status: str = Field(default="COMPLETED")
-    result: KagiSearchResponse = Field(
-        description="검색 작업자가 Redis에 저장한 최종 답변과 검색 근거"
+    status: Literal["PENDING", "COMPLETED", "PARTIAL"]
+    results: SearchResultsResponse = Field(
+        description="legacy 및 intelligent 검색 작업자의 독립적인 상태와 결과"
     )

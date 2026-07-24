@@ -8,14 +8,20 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from src.app import app
 from src.auth import get_current_user_id
-from src.search.model import KagiSearchResponse
+from src.search.model import IntelligentSearchResponse, KagiSearchResponse
 from src.search.publisher import (
     RabbitMQSearchPublisher,
     RabbitMQSettings,
     SearchPublishError,
 )
 from src.search.routes import hash_query, normalize_query
-from src.search.store import InvalidSearchData, RedisSearchStore, SearchState
+from src.search.store import (
+    IntelligentSearchState,
+    InvalidSearchData,
+    LegacySearchState,
+    RedisSearchStore,
+    SearchState,
+)
 
 
 MAGIC_CODE = "A" * 43
@@ -25,7 +31,6 @@ SECOND_MAGIC_CODE = "B" * 43
 def kagi_result() -> KagiSearchResponse:
     return KagiSearchResponse.model_validate(
         {
-            "answer": "웹에 표시할 최종 답변입니다.",
             "data": {
                 "related_search": [{"title": "연관 검색어"}],
                 "search": [
@@ -38,6 +43,41 @@ def kagi_result() -> KagiSearchResponse:
             },
             "meta": {"ms": 12},
         }
+    )
+
+
+def intelligent_result() -> IntelligentSearchResponse:
+    return IntelligentSearchResponse.model_validate(
+        {
+            "answer": "웹에 표시할 최종 답변입니다.",
+            "data": {
+                "related_search": [],
+                "search": [
+                    {
+                        "url": "https://example.com/intelligent",
+                        "title": "지능형 검색 결과",
+                        "snippet": "지능형 검색 결과 설명",
+                    }
+                ],
+            },
+            "meta": {"ms": 34},
+        }
+    )
+
+
+def combined_state(
+    *,
+    legacy_status="PENDING",
+    intelligent_status="PENDING",
+    legacy=None,
+    intelligent=None,
+) -> SearchState:
+    return SearchState(
+        legacy=LegacySearchState(status=legacy_status, result=legacy),
+        intelligent=IntelligentSearchState(
+            status=intelligent_status,
+            result=intelligent,
+        ),
     )
 
 
@@ -162,7 +202,14 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(publisher.messages, [])
 
     async def test_rejects_result_lookup_without_login(self):
-        store = FakeStore(state=SearchState(status="COMPLETED", result=kagi_result()))
+        store = FakeStore(
+            state=combined_state(
+                legacy_status="COMPLETED",
+                intelligent_status="COMPLETED",
+                legacy=kagi_result(),
+                intelligent=intelligent_result(),
+            )
+        )
         self.set_dependencies(store)
         app.dependency_overrides.pop(get_current_user_id, None)
 
@@ -218,27 +265,74 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 422)
 
     async def test_returns_accepted_while_search_is_pending(self):
-        store = FakeStore(state=SearchState(status="PENDING"))
+        store = FakeStore(
+            state=combined_state(
+                legacy_status="COMPLETED",
+                intelligent_status="PENDING",
+                legacy=kagi_result(),
+            )
+        )
         self.set_dependencies(store)
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json(), {"magicCode": MAGIC_CODE, "status": "PENDING"})
+        self.assertEqual(response.json()["status"], "PENDING")
+        self.assertEqual(
+            response.json()["results"]["legacy"]["result"],
+            kagi_result().model_dump(),
+        )
+        self.assertEqual(
+            response.json()["results"]["intelligent"],
+            {"status": "PENDING", "result": None},
+        )
         self.assertEqual(store.deleted, [])
 
-    async def test_returns_completed_result_from_store(self):
-        result = kagi_result()
-        store = FakeStore(state=SearchState(status="COMPLETED", result=result))
+    async def test_returns_completed_results_from_both_workers(self):
+        legacy = kagi_result()
+        intelligent = intelligent_result()
+        store = FakeStore(
+            state=combined_state(
+                legacy_status="COMPLETED",
+                intelligent_status="COMPLETED",
+                legacy=legacy,
+                intelligent=intelligent,
+            )
+        )
         self.set_dependencies(store)
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["result"], result.model_dump())
+        self.assertEqual(response.json()["status"], "COMPLETED")
         self.assertEqual(
-            response.json()["result"]["answer"],
+            response.json()["results"]["legacy"]["result"],
+            legacy.model_dump(),
+        )
+        self.assertEqual(
+            response.json()["results"]["intelligent"]["result"]["answer"],
             "웹에 표시할 최종 답변입니다.",
+        )
+        self.assertEqual(store.deleted, [MAGIC_CODE])
+
+    async def test_returns_partial_result_when_one_worker_failed(self):
+        legacy = kagi_result()
+        store = FakeStore(
+            state=combined_state(
+                legacy_status="COMPLETED",
+                intelligent_status="FAILED",
+                legacy=legacy,
+            )
+        )
+        self.set_dependencies(store)
+
+        response = await self.client.get(f"/search/{MAGIC_CODE}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "PARTIAL")
+        self.assertEqual(
+            response.json()["results"]["intelligent"],
+            {"status": "FAILED", "result": None},
         )
         self.assertEqual(store.deleted, [MAGIC_CODE])
 
@@ -247,9 +341,15 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
             async def delete_ticket(self, magic_code):
                 raise RedisConnectionError("redis://user:secret@internal")
 
-        result = kagi_result()
         self.set_dependencies(
-            DeleteFailingStore(state=SearchState(status="COMPLETED", result=result))
+            DeleteFailingStore(
+                state=combined_state(
+                    legacy_status="COMPLETED",
+                    intelligent_status="COMPLETED",
+                    legacy=kagi_result(),
+                    intelligent=intelligent_result(),
+                )
+            )
         )
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
@@ -262,9 +362,15 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
             async def delete_ticket(self, magic_code):
                 return False
 
-        result = kagi_result()
         self.set_dependencies(
-            ConsumedStore(state=SearchState(status="COMPLETED", result=result))
+            ConsumedStore(
+                state=combined_state(
+                    legacy_status="COMPLETED",
+                    intelligent_status="COMPLETED",
+                    legacy=kagi_result(),
+                    intelligent=intelligent_result(),
+                )
+            )
         )
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
@@ -272,7 +378,14 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 404)
 
     async def test_maps_worker_failure_to_stable_bad_gateway_response(self):
-        self.set_dependencies(FakeStore(state=SearchState(status="FAILED")))
+        self.set_dependencies(
+            FakeStore(
+                state=combined_state(
+                    legacy_status="FAILED",
+                    intelligent_status="FAILED",
+                )
+            )
+        )
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
 
@@ -280,7 +393,13 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("error_code", response.text)
 
     async def test_rejects_completed_state_without_result(self):
-        store = FakeStore(state=SearchState(status="COMPLETED"))
+        store = FakeStore(
+            state=combined_state(
+                legacy_status="COMPLETED",
+                intelligent_status="COMPLETED",
+                intelligent=intelligent_result(),
+            )
+        )
         self.set_dependencies(store)
 
         response = await self.client.get(f"/search/{MAGIC_CODE}")
@@ -311,6 +430,32 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RedisSearchStoreTest(unittest.IsolatedAsyncioTestCase):
+    async def test_create_ticket_initializes_both_worker_keys_atomically(self):
+        class FakeRedis:
+            def __init__(self):
+                self.calls = []
+
+            async def eval(self, *args):
+                self.calls.append(args)
+                return 1
+
+        redis = FakeRedis()
+        store = RedisSearchStore(redis)
+        query_hash = "a" * 64
+
+        should_publish = await store.create_ticket(MAGIC_CODE, query_hash)
+
+        self.assertTrue(should_publish)
+        self.assertEqual(redis.calls[0][1], 3)
+        self.assertEqual(
+            redis.calls[0][2:5],
+            (
+                f"saver:search:ticket:{MAGIC_CODE}",
+                f"saver:search:query:{query_hash}",
+                f"saver:search:query:{query_hash}:intelligent",
+            ),
+        )
+
     async def test_deletes_only_magic_code_ticket(self):
         class FakeRedis:
             def __init__(self):
@@ -331,12 +476,19 @@ class RedisSearchStoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_invalid_completed_json(self):
         query_hash = "a" * 64
         query_key = f"saver:search:query:{query_hash}"
+        intelligent_query_key = f"{query_key}:intelligent"
 
         class FakeRedis:
             async def hgetall(self, key):
                 if key.startswith("saver:search:ticket:"):
-                    return {"status": "COMPLETED", "query_key": query_key}
-                return {"status": "COMPLETED", "result": "not-json"}
+                    return {
+                        "status": "PENDING",
+                        "query_key": query_key,
+                        "intelligent_query_key": intelligent_query_key,
+                    }
+                if key == query_key:
+                    return {"status": "COMPLETED", "result": "not-json"}
+                return {"status": "PENDING"}
 
         store = RedisSearchStore(FakeRedis())
 
@@ -346,36 +498,168 @@ class RedisSearchStoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_completed_json_outside_kagi_contract(self):
         query_hash = "a" * 64
         query_key = f"saver:search:query:{query_hash}"
+        intelligent_query_key = f"{query_key}:intelligent"
 
         class FakeRedis:
             async def hgetall(self, key):
                 if key.startswith("saver:search:ticket:"):
-                    return {"status": "COMPLETED", "query_key": query_key}
-                return {"status": "COMPLETED", "result": '{"items": []}'}
+                    return {
+                        "status": "PENDING",
+                        "query_key": query_key,
+                        "intelligent_query_key": intelligent_query_key,
+                    }
+                if key == query_key:
+                    return {"status": "COMPLETED", "result": '{"items": []}'}
+                return {"status": "PENDING"}
 
         store = RedisSearchStore(FakeRedis())
 
         with self.assertRaises(InvalidSearchData):
             await store.read(MAGIC_CODE)
 
-    async def test_parses_completed_result_as_kagi_response(self):
+    async def test_rejects_intelligent_result_without_required_answer(self):
         query_hash = "a" * 64
         query_key = f"saver:search:query:{query_hash}"
-        expected = kagi_result()
+        intelligent_query_key = f"{query_key}:intelligent"
 
         class FakeRedis:
             async def hgetall(self, key):
                 if key.startswith("saver:search:ticket:"):
-                    return {"status": "COMPLETED", "query_key": query_key}
-                return {"status": "COMPLETED", "result": expected.to_result_json()}
+                    return {
+                        "status": "PENDING",
+                        "query_key": query_key,
+                        "intelligent_query_key": intelligent_query_key,
+                    }
+                if key == query_key:
+                    return {"status": "PENDING"}
+                return {
+                    "status": "COMPLETED",
+                    "result": kagi_result().to_result_json(),
+                }
+
+        with self.assertRaises(InvalidSearchData):
+            await RedisSearchStore(FakeRedis()).read(MAGIC_CODE)
+
+    async def test_parses_both_completed_worker_results(self):
+        query_hash = "a" * 64
+        query_key = f"saver:search:query:{query_hash}"
+        intelligent_query_key = f"{query_key}:intelligent"
+        expected_legacy = kagi_result()
+        expected_intelligent = intelligent_result()
+
+        class FakeRedis:
+            async def hgetall(self, key):
+                if key.startswith("saver:search:ticket:"):
+                    return {
+                        "status": "COMPLETED",
+                        "query_key": query_key,
+                        "intelligent_query_key": intelligent_query_key,
+                    }
+                if key == query_key:
+                    return {
+                        "status": "COMPLETED",
+                        "result": expected_legacy.to_result_json(),
+                    }
+                return {
+                    "status": "COMPLETED",
+                    "result": expected_intelligent.to_result_json(),
+                }
 
         state = await RedisSearchStore(FakeRedis()).read(MAGIC_CODE)
 
-        self.assertIsInstance(state.result, KagiSearchResponse)
-        self.assertEqual(state.result, expected)
+        self.assertIsInstance(state.legacy.result, KagiSearchResponse)
+        self.assertIsInstance(
+            state.intelligent.result,
+            IntelligentSearchResponse,
+        )
+        self.assertEqual(state.legacy.result, expected_legacy)
+        self.assertEqual(state.intelligent.result, expected_intelligent)
 
 
 class RabbitMQSearchPublisherTest(unittest.TestCase):
+    def test_declares_fanout_exchange_and_binds_both_queues(self):
+        class Channel:
+            def __init__(self):
+                self.exchanges = []
+                self.queues = []
+                self.bindings = []
+                self.confirmed = False
+
+            def exchange_declare(self, **kwargs):
+                self.exchanges.append(kwargs)
+
+            def queue_declare(self, **kwargs):
+                self.queues.append(kwargs)
+
+            def queue_bind(self, **kwargs):
+                self.bindings.append(kwargs)
+
+            def confirm_delivery(self):
+                self.confirmed = True
+
+        channel = Channel()
+
+        class Connection:
+            def channel(self):
+                return channel
+
+        settings = RabbitMQSettings(
+            "localhost",
+            5672,
+            "guest",
+            "guest",
+            "/",
+            "search.exchange",
+            "search.legacy",
+            "search.intelligent",
+        )
+        publisher = RabbitMQSearchPublisher(settings)
+        try:
+            with patch(
+                "src.search.publisher.pika.BlockingConnection",
+                return_value=Connection(),
+            ):
+                publisher._connect()
+        finally:
+            publisher._executor.shutdown(wait=True, cancel_futures=True)
+
+        self.assertEqual(
+            channel.exchanges,
+            [{
+                "exchange": "search.exchange",
+                "exchange_type": "fanout",
+                "durable": True,
+            }],
+        )
+        self.assertEqual(
+            channel.queues,
+            [
+                {"queue": "search.legacy", "durable": True},
+                {"queue": "search.intelligent", "durable": True},
+            ],
+        )
+        self.assertEqual(
+            channel.bindings,
+            [
+                {"exchange": "search.exchange", "queue": "search.legacy"},
+                {"exchange": "search.exchange", "queue": "search.intelligent"},
+            ],
+        )
+        self.assertTrue(channel.confirmed)
+
+    def test_rejects_identical_worker_queues(self):
+        with self.assertRaises(ValueError):
+            RabbitMQSettings(
+                "localhost",
+                5672,
+                "guest",
+                "guest",
+                "/",
+                "search.exchange",
+                "same.queue",
+                "same.queue",
+            )
+
     def test_reconnects_once_when_idle_connection_was_closed_by_broker(self):
         class BrokenConnection:
             is_closed = False
@@ -398,7 +682,16 @@ class RabbitMQSearchPublisherTest(unittest.TestCase):
             def basic_publish(self, **kwargs):
                 return True
 
-        settings = RabbitMQSettings("localhost", 5672, "guest", "guest", "/", "queue")
+        settings = RabbitMQSettings(
+            "localhost",
+            5672,
+            "guest",
+            "guest",
+            "/",
+            "search.exchange",
+            "search.legacy",
+            "search.intelligent",
+        )
         publisher = RabbitMQSearchPublisher(settings)
         publisher._connection = BrokenConnection()
         publisher._channel = object()
@@ -427,11 +720,23 @@ class RabbitMQSearchPublisherTest(unittest.TestCase):
                 return None
 
         class PikaChannel:
+            published = []
+
             def basic_publish(self, **kwargs):
                 # pika 1.4.x는 publisher ACK 성공 시 값을 반환하지 않는다.
+                self.published.append(kwargs)
                 return None
 
-        settings = RabbitMQSettings("localhost", 5672, "guest", "guest", "/", "queue")
+        settings = RabbitMQSettings(
+            "localhost",
+            5672,
+            "guest",
+            "guest",
+            "/",
+            "search.exchange",
+            "search.legacy",
+            "search.intelligent",
+        )
         publisher = RabbitMQSearchPublisher(settings)
         publisher._connection = HealthyConnection()
         publisher._channel = PikaChannel()
@@ -441,6 +746,11 @@ class RabbitMQSearchPublisherTest(unittest.TestCase):
             publisher._executor.shutdown(wait=True, cancel_futures=True)
 
         self.assertIsNone(result)
+        self.assertEqual(
+            publisher._channel.published[0]["exchange"],
+            "search.exchange",
+        )
+        self.assertEqual(publisher._channel.published[0]["routing_key"], "")
 
 
 class SearchNormalizationTest(unittest.TestCase):

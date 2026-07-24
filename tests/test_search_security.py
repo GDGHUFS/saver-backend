@@ -169,6 +169,19 @@ class WorkerStartupSecurityTest(unittest.TestCase):
 
         self.assertEqual(settings.redis_password, "redis-secret")
 
+    def test_enabled_worker_uses_dedicated_intelligent_queue(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "SEARCH_EXTERNAL_PROCESSING_ENABLED": "true",
+                "SEARCH_INTELLIGENT_QUEUE": "search.intelligent.test",
+            },
+            clear=True,
+        ):
+            settings = WorkerSettings.from_env()
+
+        self.assertEqual(settings.queue, "search.intelligent.test")
+
 
 class FakeRedis:
     def __init__(self, values, *, eval_result=1):
@@ -214,7 +227,7 @@ class WorkerCommandAuthorizationTest(unittest.TestCase):
             rabbitmq_user="worker",
             rabbitmq_password="secret",
             rabbitmq_vhost="/",
-            queue="saver.search.requests",
+            queue="saver.search.intelligent.requests",
             redis_host="localhost",
             redis_port=6379,
             redis_db=0,
@@ -229,14 +242,16 @@ class WorkerCommandAuthorizationTest(unittest.TestCase):
 
     def redis_values(self, query="보안 검색", *, query_status="PENDING"):
         query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
-        query_key = f"saver:search:query:{query_hash}"
+        legacy_query_key = f"saver:search:query:{query_hash}"
+        query_key = f"{legacy_query_key}:intelligent"
         query_data = {"status": query_status}
         if query_status == "COMPLETED":
             query_data["result"] = "{}"
         return {
             f"saver:search:ticket:{MAGIC_CODE}": {
                 "status": "PENDING",
-                "query_key": query_key,
+                "query_key": legacy_query_key,
+                "intelligent_query_key": query_key,
             },
             query_key: query_data,
         }
@@ -284,6 +299,9 @@ class WorkerCommandAuthorizationTest(unittest.TestCase):
 
         self.assertEqual(channel.acked, [9])
         self.assertEqual(len(redis_client.eval_calls), 1)
+        self.assertTrue(
+            redis_client.eval_calls[0][2].endswith(":intelligent")
+        )
 
 
 class SearchRateLimitPrivacyTest(unittest.IsolatedAsyncioTestCase):
