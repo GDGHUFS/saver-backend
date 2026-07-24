@@ -25,6 +25,7 @@ SECOND_MAGIC_CODE = "B" * 43
 def kagi_result() -> KagiSearchResponse:
     return KagiSearchResponse.model_validate(
         {
+            "answer": "웹에 표시할 최종 답변입니다.",
             "data": {
                 "related_search": [{"title": "연관 검색어"}],
                 "search": [
@@ -235,6 +236,10 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"], result.model_dump())
+        self.assertEqual(
+            response.json()["result"]["answer"],
+            "웹에 표시할 최종 답변입니다.",
+        )
         self.assertEqual(store.deleted, [MAGIC_CODE])
 
     async def test_returns_service_unavailable_when_completed_ticket_delete_fails(self):

@@ -148,11 +148,11 @@ async def submit_search(
     summary="검색 상태 및 결과 조회",
     description=(
         "로그인한 사용자가 magicCode로 Redis 상태를 확인합니다. 처리 중이면 202, 완료된 경우 Redis의 "
-        "JSON 결과와 함께 200을 반환하고 사용한 magicCode를 삭제합니다. 이 API는 외부 검색 호출이나 "
-        "RabbitMQ 발행을 수행하지 않습니다."
+        "최종 답변(`result.answer`)과 검색 근거를 200으로 반환하고 사용한 magicCode를 삭제합니다. "
+        "이 API는 외부 검색 호출이나 RabbitMQ 발행을 수행하지 않습니다."
     ),
     responses={
-        200: {"description": "Redis에 저장된 검색 결과가 반환됨"},
+        200: {"description": "Redis에 저장된 최종 답변과 검색 근거가 반환됨"},
         202: {
             "description": "검색 작업이 아직 처리 중임",
             "model": SearchPendingResponse,

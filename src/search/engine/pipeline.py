@@ -236,6 +236,11 @@ class IntelligentSearchEngine:
             execution_metadata=execution,
         )
 
+    async def aclose(self) -> None:
+        if self._owned_llm_client is not None:
+            await self._owned_llm_client.close()
+            self._owned_llm_client = None
+
     def _analyzer_from_env(self) -> OpenAIQueryAnalyzer:
         from openai import AsyncOpenAI
         import certifi

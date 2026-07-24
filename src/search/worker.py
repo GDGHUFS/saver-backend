@@ -16,7 +16,9 @@ import redis
 from dotenv import load_dotenv
 
 from src.search.engine import IntelligentSearchEngine
+from src.search.engine.answer import generate_answer
 from src.search.engine.config import LLMSettings, boolean_from_env
+from src.search.model import KagiSearchResponse
 
 
 MAX_COMMAND_BYTES = 4_096
@@ -49,13 +51,6 @@ return 1
 """
 
 
-def _required_secret(name: str) -> str:
-    value = os.getenv(name, "")
-    if not value.strip():
-        raise ValueError(f"{name} is required")
-    return value
-
-
 @dataclass(frozen=True)
 class WorkerSettings:
     rabbitmq_host: str
@@ -67,6 +62,7 @@ class WorkerSettings:
     redis_host: str
     redis_port: int
     redis_db: int
+    redis_password: str | None
     result_ttl: int
 
     @classmethod
@@ -88,6 +84,7 @@ class WorkerSettings:
             redis_host=os.getenv("REDIS_HOST", "localhost"),
             redis_port=int(os.getenv("REDIS_PORT", "6379")),
             redis_db=int(os.getenv("REDIS_DB", "0")),
+            redis_password=os.getenv("REDIS_PASSWORD") or None,
             result_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
         )
 
@@ -129,8 +126,10 @@ def _validated_command(body: bytes) -> dict[str, str]:
 async def _search_result(engine: IntelligentSearchEngine, query: str) -> str:
     started = perf_counter()
     response = await engine.search(query)
+    answer = await generate_answer(engine, query, response)
     elapsed_ms = max(0, round((perf_counter() - started) * 1000))
     payload: dict[str, Any] = {
+        "answer": answer,
         "data": {
             "related_search": [],
             "search": [
@@ -145,7 +144,7 @@ async def _search_result(engine: IntelligentSearchEngine, query: str) -> str:
         },
         "meta": {"ms": elapsed_ms},
     }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return KagiSearchResponse.model_validate(payload).to_result_json()
 
 
 class SearchWorker:
@@ -162,10 +161,12 @@ class SearchWorker:
             for descriptor in self.engine.registry.descriptors()
         ):
             raise ValueError("at least one external search provider is required")
+        self._event_loop = asyncio.new_event_loop()
         self.redis = redis.Redis(
             host=settings.redis_host,
             port=settings.redis_port,
             db=settings.redis_db,
+            password=settings.redis_password,
             decode_responses=True,
             socket_connect_timeout=5,
             socket_timeout=5,
@@ -237,6 +238,10 @@ class SearchWorker:
         finally:
             if connection.is_open:
                 connection.close()
+            try:
+                self._event_loop.run_until_complete(self.engine.aclose())
+            finally:
+                self._event_loop.close()
 
     def _consume(
         self,
@@ -266,7 +271,9 @@ class SearchWorker:
             return
 
         try:
-            result = asyncio.run(_search_result(self.engine, command["query"]))
+            result = self._event_loop.run_until_complete(
+                _search_result(self.engine, command["query"])
+            )
             self._complete_query(query_key, result)
         except redis.exceptions.RedisError:
             channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)

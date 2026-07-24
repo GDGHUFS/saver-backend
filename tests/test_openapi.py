@@ -89,6 +89,9 @@ class OpenApiTest(unittest.TestCase):
             result_schema["properties"]["result"]["$ref"],
             "#/components/schemas/KagiSearchResponse",
         )
+        worker_result_schema = schema["components"]["schemas"]["KagiSearchResponse"]
+        self.assertIn("answer", worker_result_schema["properties"])
+        self.assertNotIn("answer", worker_result_schema["required"])
 
     def test_news_endpoint_documents_public_filtered_read(self):
         schema = app.openapi()

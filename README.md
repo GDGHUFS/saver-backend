@@ -7,7 +7,9 @@
 ## 검색 API
 
 - `POST /search`: 로그인 사용자의 `{"query": "..."}`를 받아 `202`와 `magicCode`를 반환한다.
-- `GET /search/{magicCode}`: 로그인 상태를 확인하고, 처리 중에는 `202`, 완료 시에는 `200`과 Redis 결과를 반환한 뒤 사용한 `magicCode`를 삭제한다.
+- `GET /search/{magicCode}`: 로그인 상태를 확인하고, 처리 중에는 `202`, 완료 시에는
+  CLI와 동일한 최종 답변을 `result.answer`에, 검색 근거를 `result.data.search`에 담아
+  `200`으로 반환한 뒤 사용한 `magicCode`를 삭제한다.
 
 두 API 모두 유효한 Saver 세션 쿠키와 해당 사용자의 DB 행이 필요하다. 인증된 사용자 ID 원문은
 Redis 검색 상태 또는 RabbitMQ 메시지에 연결하거나 저장하지 않는다. 검색 접수 남용 방지를 위해
@@ -23,7 +25,33 @@ RabbitMQ 발행을 생략하며, 결과가 없으면 durable queue에 persistent
 - `saver:search:query:{sha256}`: hash, 기본 TTL 180초, 필드 `status`, 완료 시 `result`
 - `saver:search:rate:{hmac}`: 사용자별 검색 접수 횟수, 기본 60초
 
-상태는 `PENDING`, `COMPLETED`, `FAILED` 중 하나다. `result`는 UTF-8 JSON 문자열이어야 한다.
+상태는 `PENDING`, `COMPLETED`, `FAILED` 중 하나다. `result`는 UTF-8 JSON 문자열이어야 하며,
+새 worker는 최상위 `answer`에 최종 답변을 저장한다. 배포 전 생성되어 TTL 동안 남아 있는 결과와의
+호환성을 위해 API에서 `answer`는 선택 필드다.
+
+완료 응답 예시는 다음과 같다.
+
+```json
+{
+  "magicCode": "발급받은 magicCode",
+  "status": "COMPLETED",
+  "result": {
+    "answer": "검색 근거를 바탕으로 생성한 최종 답변",
+    "data": {
+      "related_search": [],
+      "search": [
+        {
+          "url": "https://example.com/source",
+          "title": "검색 근거",
+          "snippet": "근거 요약"
+        }
+      ]
+    },
+    "meta": {"ms": 1234}
+  }
+}
+```
+
 외부 검색 작업자는 기본 queue `saver.search.requests`에서 아래 메시지를 소비한다.
 
 ```json
@@ -40,7 +68,7 @@ RabbitMQ 발행을 생략하며, 결과가 없으면 durable queue에 persistent
 Redis 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 query hash의 `status`와 `result`를
 각각 `COMPLETED` 및 JSON 문자열로 저장한다. 실패 시 query hash 상태를 `FAILED`로 저장할 수 있다.
 
-연결과 TTL은 `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `RABBITMQ_HOST`,
+연결과 TTL은 `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, 선택적인 `REDIS_PASSWORD`, `RABBITMQ_HOST`,
 `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`, `SEARCH_QUEUE`,
 `SEARCH_MAGIC_CODE_TTL`, `SEARCH_QUERY_TTL`, `SEARCH_RATE_LIMIT_MAX`,
 `SEARCH_RATE_LIMIT_WINDOW` 환경 변수로 설정한다. 기본 검색 접수 제한은 사용자별 60초당 10회다.
@@ -112,6 +140,12 @@ GitHub Actions의 `Build and push container image` workflow는 표준 Docker Bui
 - `DOCKERHUB_REPOSITORY`: 사용자 계정 아래의 repository 이름(예: `saver-backend`)
 
 컨테이너 실행 시 PostgreSQL, Redis, RabbitMQ, 카카오 인증 및 세션 관련 환경 변수를 주입해야 한다.
+Redis가 비공개 컨테이너 네트워크에서 인증 없이 동작한다면 `REDIS_PASSWORD`를 설정하지 않는다.
+비밀번호 인증을 활성화한 Redis에서만 이 값을 backend와 worker에 동일하게 주입한다.
+웹 배포에서는 같은 이미지로 두 프로세스를 실행한다. HTTP 서비스는 이미지의 기본 command를 사용하고,
+검색 worker 서비스는 command를 `python -m src.search.worker`로 덮어쓴다. 두 프로세스에는 같은
+Redis·RabbitMQ 설정을 주입하고, 외부 API 키와 `SEARCH_EXTERNAL_PROCESSING_ENABLED=true`는
+검색 worker에만 주입한다. worker가 없으면 `POST /search`는 접수되더라도 결과가 완성되지 않는다.
 
 TODO: 운영 동시성 기준을 정한 뒤 Gunicorn과 `uvicorn.workers.UvicornWorker`를 사용하는 다중 worker
 구성으로 전환한다. 현재 이미지는 Uvicorn 단일 프로세스로 실행한다.

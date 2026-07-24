@@ -73,6 +73,15 @@ class KagiSearchMeta(BaseModel):
 class KagiSearchResponse(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
+    answer: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20_000,
+        description=(
+            "검색 결과를 근거로 worker가 생성한 최종 답변. "
+            "이 필드 도입 전에 캐시된 결과에는 없을 수 있습니다."
+        ),
+    )
     data: KagiSearchData
     meta: KagiSearchMeta
 
@@ -86,5 +95,5 @@ class SearchResultResponse(BaseModel):
     magic_code: str = Field(alias="magicCode")
     status: str = Field(default="COMPLETED")
     result: KagiSearchResponse = Field(
-        description="검색 작업자가 Redis에 저장한 Kagi 검색 결과"
+        description="검색 작업자가 Redis에 저장한 최종 답변과 검색 근거"
     )

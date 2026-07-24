@@ -21,6 +21,8 @@ PG_DATABASE=saverdb
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=0
+# 이 저장소의 로컬 compose는 Redis 인증을 활성화하므로 필수
+REDIS_PASSWORD=충분히_긴_Redis_비밀번호
 
 RABBITMQ_HOST=localhost
 RABBITMQ_PORT=5672
@@ -67,6 +69,10 @@ docker compose ps
 `postgres`, `redis`, `rabbitmq`가 모두 실행 중이면 정상이다. 모든 포트는 보안을 위해
 `127.0.0.1`에만 열린다. RabbitMQ 관리 화면은 `http://localhost:15672`이며 계정은
 `.env`의 `RABBITMQ_USER`와 `RABBITMQ_PASSWORD`를 사용한다.
+
+별도의 비공개 컨테이너 네트워크에서 비밀번호 없이 Redis를 운영한다면 backend와 worker 환경에서
+`REDIS_PASSWORD`를 생략한다. 빈 문자열도 무인증 연결로 처리된다. 위 예시는 이 저장소의
+`compose.yaml`이 `requirepass`를 활성화하기 때문에 비밀번호가 필요한 경우다.
 
 이 Compose 파일은 로컬 개발 전용이다. 운영 서버에서는 그대로 사용하지 말고 비공개 네트워크,
 TLS, 전용 secret 관리 및 최소 권한 계정을 적용한 별도 배포 설정을 사용한다.
@@ -126,6 +132,11 @@ frontend 검색 요청
 ```
 
 backend만 실행하고 worker를 실행하지 않으면 검색 상태는 `PENDING`으로 남다가 TTL 이후 만료될 수 있다.
+
+완료 응답의 `result.answer`에는 아래 CLI가 출력하는 것과 같은 최종 답변이 들어가고,
+`result.data.search`에는 답변의 검색 근거가 들어간다. 로그인한 브라우저에서
+`http://localhost:5050/docs`를 열어 `POST /search`로 발급받은 `magicCode`를
+`GET /search/{magic_code}`에 입력하면 이 비동기 흐름을 직접 확인할 수 있다.
 
 
 ## 5. 질문 답변을 CLI로 직접 테스트
