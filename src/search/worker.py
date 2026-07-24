@@ -67,7 +67,6 @@ class WorkerSettings:
     redis_host: str
     redis_port: int
     redis_db: int
-    redis_password: str
     result_ttl: int
 
     @classmethod
