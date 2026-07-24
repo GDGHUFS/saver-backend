@@ -74,7 +74,10 @@ class OpenApiTest(unittest.TestCase):
 
         submit = schema["paths"]["/search"]["post"]
         result = schema["paths"]["/search/{magic_code}"]["get"]
-        self.assertEqual(set(submit["responses"]), {"202", "401", "422", "503"})
+        self.assertEqual(
+            set(submit["responses"]),
+            {"202", "401", "429", "422", "503"},
+        )
         self.assertEqual(
             set(result["responses"]),
             {"200", "202", "401", "404", "422", "502", "503"},

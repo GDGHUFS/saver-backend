@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import asdict
 from time import perf_counter
 from typing import Any
 
 from src.search.engine.analysis import OpenAIQueryAnalyzer
-from src.search.engine.config import EngineConfig
+from src.search.engine.config import EngineConfig, LLMSettings
 from src.search.engine.kakao import KakaoSearchSettings, KakaoWebSearchProvider
 from src.search.engine.naver import NaverSearchSettings, NaverWebSearchProvider
 from src.search.engine.planner import RuleBasedPlanner
@@ -26,7 +25,7 @@ class IntelligentSearchEngine:
         *,
         analyzer: OpenAIQueryAnalyzer | None = None,
     ) -> None:
-        self.config = config or EngineConfig()
+        self.config = config or EngineConfig.from_env()
         self.registry = registry or ProviderRegistry()
         if registry is None:
             if self.config.use_mock_providers:
@@ -242,17 +241,17 @@ class IntelligentSearchEngine:
         import certifi
         import httpx
 
-        api_key = os.getenv("LLM_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError("LLM_API_KEY is required")
+        settings = LLMSettings.from_env()
         self._owned_llm_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").strip(),
+            api_key=settings.api_key,
+            base_url=settings.base_url,
+            timeout=settings.timeout_seconds,
+            max_retries=1,
             http_client=httpx.AsyncClient(verify=certifi.where()),
         )
         return OpenAIQueryAnalyzer(
             self._owned_llm_client,
-            model=os.getenv("LLM_MODEL", "gpt-4.1-mini"),
+            model=settings.model,
         )
 
     async def _search_provider(self, provider_id: str, analysis: QueryAnalysis) -> list[Any]:

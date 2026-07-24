@@ -64,6 +64,7 @@ def storage_unavailable(operation: str, exc: BaseException) -> HTTPException:
     responses={
         202: {"description": "검색이 접수되고 결과 조회용 magicCode가 발급됨"},
         401: {"description": "로그인 세션이 없거나 유효하지 않음"},
+        429: {"description": "사용자별 검색 접수 허용량을 초과함"},
         422: {"description": "검색어 또는 요청 형식이 유효하지 않음"},
         503: {"description": "인증 DB, Redis 또는 RabbitMQ를 일시적으로 사용할 수 없음"},
     },
@@ -71,7 +72,7 @@ def storage_unavailable(operation: str, exc: BaseException) -> HTTPException:
 async def submit_search(
     request: Request,
     search: SearchRequest,
-    _user_id: Annotated[int, Depends(get_current_user_id)],
+    user_id: Annotated[int, Depends(get_current_user_id)],
 ) -> SearchAcceptedResponse:
     normalized_query = normalize_query(search.query)
     if not normalized_query:
@@ -79,6 +80,23 @@ async def submit_search(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="검색어가 비어 있습니다.",
         )
+    try:
+        allowed = await request.app.state.search_store.allow_submission(user_id)
+    except REDIS_ERRORS as exc:
+        raise storage_unavailable("rate-limit", exc) from exc
+    except InvalidSearchData as exc:
+        raise storage_unavailable("rate-limit-result", exc) from exc
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="검색 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+            headers={
+                "Retry-After": str(
+                    request.app.state.search_store.rate_limit_window
+                )
+            },
+        )
+
     query_hash = hash_query(normalized_query)
     magic_code = secrets.token_urlsafe(32)
 

@@ -16,12 +16,11 @@ class KakaoSearchSettingsTest(unittest.TestCase):
         self.assertIsNotNone(settings)
         self.assertEqual(settings.rest_api_key, "search-key")
 
-    def test_falls_back_to_existing_kakao_rest_api_key(self):
+    def test_does_not_reuse_login_rest_api_key(self):
         with patch.dict("os.environ", {"KAKAO_KEY": "oauth-key"}, clear=True):
             settings = KakaoSearchSettings.from_env()
 
-        self.assertIsNotNone(settings)
-        self.assertEqual(settings.rest_api_key, "oauth-key")
+        self.assertIsNone(settings)
 
 
 if __name__ == "__main__":

@@ -5,15 +5,55 @@ import asyncio
 import hashlib
 import json
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import pika
 import redis
 from dotenv import load_dotenv
 
 from src.search.engine import IntelligentSearchEngine
+from src.search.engine.config import LLMSettings, boolean_from_env
+
+
+MAX_COMMAND_BYTES = 4_096
+MAGIC_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+QUERY_PREFIX = "saver:search:query:"
+TICKET_PREFIX = "saver:search:ticket:"
+
+COMPLETE_QUERY_SCRIPT = """
+local status = redis.call('HGET', KEYS[1], 'status')
+if status == 'COMPLETED' and redis.call('HEXISTS', KEYS[1], 'result') == 1 then
+    return 0
+end
+if status ~= 'PENDING' then
+    return -1
+end
+redis.call('HSET', KEYS[1], 'status', 'COMPLETED', 'result', ARGV[1])
+redis.call('HDEL', KEYS[1], 'error_code')
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+return 1
+"""
+
+FAIL_QUERY_SCRIPT = """
+if redis.call('HGET', KEYS[1], 'status') ~= 'PENDING' then
+    return 0
+end
+redis.call('HSET', KEYS[1], 'status', 'FAILED', 'error_code', 'WORKER_FAILED')
+redis.call('HDEL', KEYS[1], 'result')
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+return 1
+"""
+
+
+def _required_secret(name: str) -> str:
+    value = os.getenv(name, "")
+    if not value.strip():
+        raise ValueError(f"{name} is required")
+    return value
 
 
 @dataclass(frozen=True)
@@ -27,11 +67,18 @@ class WorkerSettings:
     redis_host: str
     redis_port: int
     redis_db: int
-    redis_password: str | None
+    redis_password: str
     result_ttl: int
 
     @classmethod
     def from_env(cls) -> WorkerSettings:
+        if not boolean_from_env(
+            "SEARCH_EXTERNAL_PROCESSING_ENABLED",
+            default=False,
+        ):
+            raise ValueError(
+                "SEARCH_EXTERNAL_PROCESSING_ENABLED must be true to start the worker"
+            )
         return cls(
             rabbitmq_host=os.getenv("RABBITMQ_HOST", "localhost"),
             rabbitmq_port=int(os.getenv("RABBITMQ_PORT", "5672")),
@@ -42,24 +89,42 @@ class WorkerSettings:
             redis_host=os.getenv("REDIS_HOST", "localhost"),
             redis_port=int(os.getenv("REDIS_PORT", "6379")),
             redis_db=int(os.getenv("REDIS_DB", "0")),
-            redis_password=os.getenv("REDIS_PASSWORD") or None,
             result_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
         )
 
 
 def _validated_command(body: bytes) -> dict[str, str]:
+    if not body or len(body) > MAX_COMMAND_BYTES:
+        raise ValueError("invalid search command size")
     payload = json.loads(body.decode("utf-8"))
     if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
         raise ValueError("unsupported search command")
     query = payload.get("query")
     query_hash = payload.get("queryHash")
     job_id = payload.get("jobId")
+    magic_code = payload.get("magicCode")
     if not isinstance(query, str) or not query or len(query) > 200:
         raise ValueError("invalid search query")
+    if any(ord(character) < 32 for character in query):
+        raise ValueError("invalid search query")
+    normalized_query = " ".join(
+        unicodedata.normalize("NFKC", query).split()
+    ).casefold()
+    if query != normalized_query:
+        raise ValueError("search query is not normalized")
+    if (
+        not isinstance(magic_code, str)
+        or MAGIC_CODE_PATTERN.fullmatch(magic_code) is None
+    ):
+        raise ValueError("invalid magic code")
     expected_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
     if query_hash != expected_hash or job_id != expected_hash:
         raise ValueError("invalid search command hash")
-    return {"query": query, "query_hash": query_hash}
+    return {
+        "query": query,
+        "query_hash": query_hash,
+        "magic_code": magic_code,
+    }
 
 
 async def _search_result(engine: IntelligentSearchEngine, query: str) -> str:
@@ -87,13 +152,64 @@ async def _search_result(engine: IntelligentSearchEngine, query: str) -> str:
 class SearchWorker:
     def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
+        LLMSettings.from_env()
         self.engine = IntelligentSearchEngine()
+        real_providers = {
+            "naver_web_search",
+            "kakao_web_search",
+        }
+        if not any(
+            descriptor.provider_id in real_providers
+            for descriptor in self.engine.registry.descriptors()
+        ):
+            raise ValueError("at least one external search provider is required")
         self.redis = redis.Redis(
             host=settings.redis_host,
             port=settings.redis_port,
             db=settings.redis_db,
-            password=settings.redis_password,
             decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+
+    def _command_state(
+        self,
+        command: dict[str, str],
+    ) -> Literal["PENDING", "COMPLETED"]:
+        query_key = f"{QUERY_PREFIX}{command['query_hash']}"
+        ticket = self.redis.hgetall(f"{TICKET_PREFIX}{command['magic_code']}")
+        query = self.redis.hgetall(query_key)
+        if (
+            ticket.get("status") != "PENDING"
+            or ticket.get("query_key") != query_key
+        ):
+            raise ValueError("search command has no matching ticket")
+        query_status = query.get("status")
+        if query_status == "COMPLETED" and isinstance(query.get("result"), str):
+            return "COMPLETED"
+        if query_status != "PENDING":
+            raise ValueError("search command has no pending query")
+        return "PENDING"
+
+    def _complete_query(self, query_key: str, result: str) -> None:
+        outcome = self.redis.eval(
+            COMPLETE_QUERY_SCRIPT,
+            1,
+            query_key,
+            result,
+            self.settings.result_ttl,
+        )
+        if outcome not in (0, 1):
+            raise redis.exceptions.ResponseError(
+                "query is not pending or completed"
+            )
+
+    def _fail_query(self, query_key: str) -> None:
+        self.redis.eval(
+            FAIL_QUERY_SCRIPT,
+            1,
+            query_key,
+            self.settings.result_ttl,
         )
 
     def run(self) -> None:
@@ -130,25 +246,38 @@ class SearchWorker:
         _properties: pika.BasicProperties,
         body: bytes,
     ) -> None:
-        query_key: str | None = None
         try:
             command = _validated_command(body)
-            query_key = f"saver:search:query:{command['query_hash']}"
-            result = asyncio.run(_search_result(self.engine, command["query"]))
-            pipe = self.redis.pipeline(transaction=True)
-            pipe.hset(query_key, mapping={"status": "COMPLETED", "result": result})
-            pipe.hdel(query_key, "error_code")
-            pipe.expire(query_key, self.settings.result_ttl)
-            pipe.execute()
+        except (UnicodeError, ValueError):
+            channel.basic_reject(delivery_tag=method.delivery_tag, requeue=False)
+            return
+
+        query_key = f"{QUERY_PREFIX}{command['query_hash']}"
+        try:
+            command_state = self._command_state(command)
         except ValueError:
             channel.basic_reject(delivery_tag=method.delivery_tag, requeue=False)
             return
+        except redis.exceptions.RedisError:
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            return
+
+        if command_state == "COMPLETED":
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+            return
+
+        try:
+            result = asyncio.run(_search_result(self.engine, command["query"]))
+            self._complete_query(query_key, result)
+        except redis.exceptions.RedisError:
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            return
         except Exception:
-            if query_key is not None:
-                pipe = self.redis.pipeline(transaction=True)
-                pipe.hset(query_key, mapping={"status": "FAILED", "error_code": "WORKER_FAILED"})
-                pipe.expire(query_key, self.settings.result_ttl)
-                pipe.execute()
+            try:
+                self._fail_query(query_key)
+            except redis.exceptions.RedisError:
+                channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                return
             channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
             return
         channel.basic_ack(delivery_tag=method.delivery_tag)

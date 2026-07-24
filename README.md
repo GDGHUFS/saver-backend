@@ -5,8 +5,9 @@
 - `POST /search`: 로그인 사용자의 `{"query": "..."}`를 받아 `202`와 `magicCode`를 반환한다.
 - `GET /search/{magicCode}`: 로그인 상태를 확인하고, 처리 중에는 `202`, 완료 시에는 `200`과 Redis 결과를 반환한 뒤 사용한 `magicCode`를 삭제한다.
 
-두 API 모두 유효한 Saver 세션 쿠키와 해당 사용자의 DB 행이 필요하다. 인증된 사용자 ID는 접근
-허용 여부 확인에만 사용하며 Redis 키, 검색 상태 또는 RabbitMQ 메시지와 연결하거나 저장하지 않는다.
+두 API 모두 유효한 Saver 세션 쿠키와 해당 사용자의 DB 행이 필요하다. 인증된 사용자 ID 원문은
+Redis 검색 상태 또는 RabbitMQ 메시지에 연결하거나 저장하지 않는다. 검색 접수 남용 방지를 위해
+세션 비밀값으로 HMAC 처리한 비가역 식별자만 별도 rate-limit 키에 사용한다.
 
 검색 상태의 유일한 원천은 Redis다. 동일한 정규화 검색어의 완료 결과가 Redis에 있으면
 RabbitMQ 발행을 생략하며, 결과가 없으면 durable queue에 persistent 메시지를 publisher confirm과
@@ -16,6 +17,7 @@ RabbitMQ 발행을 생략하며, 결과가 없으면 durable queue에 persistent
 
 - `saver:search:ticket:{magicCode}`: hash, 기본 TTL 60초, 필드 `status`, `query_key`
 - `saver:search:query:{sha256}`: hash, 기본 TTL 180초, 필드 `status`, 완료 시 `result`
+- `saver:search:rate:{hmac}`: 사용자별 검색 접수 횟수, 기본 60초
 
 상태는 `PENDING`, `COMPLETED`, `FAILED` 중 하나다. `result`는 UTF-8 JSON 문자열이어야 한다.
 외부 검색 작업자는 기본 queue `saver.search.requests`에서 아래 메시지를 소비한다.
@@ -36,7 +38,8 @@ Redis 갱신을 완료한 뒤 RabbitMQ 메시지를 ACK하고, 완료 시 query 
 
 연결과 TTL은 `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `RABBITMQ_HOST`,
 `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`, `SEARCH_QUEUE`,
-`SEARCH_MAGIC_CODE_TTL`, `SEARCH_QUERY_TTL` 환경 변수로 설정한다.
+`SEARCH_MAGIC_CODE_TTL`, `SEARCH_QUERY_TTL`, `SEARCH_RATE_LIMIT_MAX`,
+`SEARCH_RATE_LIMIT_WINDOW` 환경 변수로 설정한다. 기본 검색 접수 제한은 사용자별 60초당 10회다.
 
 ## 운영 정책 및 TODO
 

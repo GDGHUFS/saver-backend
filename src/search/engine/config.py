@@ -1,5 +1,65 @@
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+
+
+TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def boolean_from_env(name: str, *, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    value = raw_value.strip().casefold()
+    if value in TRUE_VALUES:
+        return True
+    if value in FALSE_VALUES:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
+@dataclass(frozen=True)
+class LLMSettings:
+    api_key: str
+    base_url: str
+    model: str
+    timeout_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "LLMSettings":
+        api_key = os.getenv("LLM_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError("LLM_API_KEY is required")
+
+        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").strip()
+        parsed = urlsplit(base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "LLM_BASE_URL must be an absolute HTTP(S) URL without credentials, "
+                "query, or fragment"
+            )
+        if parsed.scheme == "http" and parsed.hostname not in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
+            raise ValueError("remote LLM_BASE_URL must use HTTPS")
+
+        model = os.getenv("LLM_MODEL", "gpt-4.1-mini").strip()
+        if not model:
+            raise ValueError("LLM_MODEL is required")
+        timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+        if timeout_seconds <= 0:
+            raise ValueError("LLM_TIMEOUT_SECONDS must be greater than zero")
+        return cls(api_key, base_url, model, timeout_seconds)
 
 
 @dataclass(frozen=True)
@@ -40,7 +100,7 @@ class EngineConfig:
     max_candidates: int = 20
     max_results: int = 10
     provider_timeout_seconds: float = 3.0
-    use_mock_providers: bool = True
+    use_mock_providers: bool = False
 
     def __post_init__(self) -> None:
         if self.max_candidates <= 0 or self.max_results <= 0:
@@ -49,10 +109,13 @@ class EngineConfig:
             raise ValueError("provider_timeout_seconds must be greater than zero")
 
     @classmethod
-    def from_env(cls, *, use_mock_providers: bool) -> "EngineConfig":
+    def from_env(cls) -> "EngineConfig":
         return cls(
             max_candidates=int(os.getenv("SEARCH_MAX_CANDIDATES", "20")),
             max_results=int(os.getenv("SEARCH_MAX_RESULTS", "10")),
             provider_timeout_seconds=float(os.getenv("SEARCH_PROVIDER_TIMEOUT", "3")),
-            use_mock_providers=use_mock_providers,
+            use_mock_providers=boolean_from_env(
+                "SEARCH_USE_MOCK_PROVIDERS",
+                default=False,
+            ),
         )

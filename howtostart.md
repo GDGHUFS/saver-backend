@@ -7,7 +7,7 @@
 ```dotenv
 KAKAO_KEY=발급받은_카카오_REST_API_키
 KAKAO_SECRET=발급받은_카카오_Client_Secret
-SESSION_SECRET=충분히_긴_랜덤_문자열
+SESSION_SECRET=32바이트_이상의_충분히_긴_랜덤_문자열
 
 FRONTEND_URL=http://localhost:5173
 HOST=http://localhost:5050
@@ -30,15 +30,21 @@ RABBITMQ_VHOST=/
 SEARCH_QUEUE=saver.search.requests
 SEARCH_MAGIC_CODE_TTL=60
 SEARCH_QUERY_TTL=180
+SEARCH_RATE_LIMIT_MAX=10
+SEARCH_RATE_LIMIT_WINDOW=60
+# 검색어의 외부 전송 정책을 확인한 뒤 worker 실행 환경에서만 true로 설정
+SEARCH_EXTERNAL_PROCESSING_ENABLED=true
+SEARCH_USE_MOCK_PROVIDERS=false
 
 LLM_API_KEY=발급받은_OpenAI_API_키
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4.1-mini
+LLM_TIMEOUT_SECONDS=30
 
 NAVER_SEARCH_CLIENT_ID=발급받은_네이버_Client_ID
 NAVER_SEARCH_CLIENT_SECRET=발급받은_네이버_Client_Secret
 
-# 선택 사항. 없으면 기존 KAKAO_KEY를 검색 키로 사용한다.
+# 로그인용 KAKAO_KEY와 분리된 검색 전용 키
 KAKAO_SEARCH_REST_API_KEY=발급받은_카카오_REST_API_키
 ```
 
@@ -58,8 +64,12 @@ docker compose up -d
 docker compose ps
 ```
 
-`postgres`, `redis`, `rabbitmq`가 모두 실행 중이면 정상이다. RabbitMQ 관리 화면은
-`http://localhost:15672`이며 기본 계정은 `guest` / `guest`다.
+`postgres`, `redis`, `rabbitmq`가 모두 실행 중이면 정상이다. 모든 포트는 보안을 위해
+`127.0.0.1`에만 열린다. RabbitMQ 관리 화면은 `http://localhost:15672`이며 계정은
+`.env`의 `RABBITMQ_USER`와 `RABBITMQ_PASSWORD`를 사용한다.
+
+이 Compose 파일은 로컬 개발 전용이다. 운영 서버에서는 그대로 사용하지 말고 비공개 네트워크,
+TLS, 전용 secret 관리 및 최소 권한 계정을 적용한 별도 배포 설정을 사용한다.
 
 최초 실행이거나 DB 테이블을 다시 확인해야 한다면 프로젝트의 기존 DB 초기화 절차도 실행한다.
 
@@ -102,6 +112,9 @@ Search worker is consuming queue saver.search.requests
 ```
 
 worker는 FastAPI 요청 프로세스와 분리되어 동작한다.
+
+`SEARCH_EXTERNAL_PROCESSING_ENABLED=true`는 사용자의 검색어가 설정된 LLM 및 검색 Provider로
+전송됨을 확인한 운영 환경에서만 사용한다. 기본값은 외부 전송을 막는 `false`다.
 
 ```text
 frontend 검색 요청

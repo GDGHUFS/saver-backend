@@ -30,12 +30,7 @@ class KakaoSearchSettings:
 
     @classmethod
     def from_env(cls) -> "KakaoSearchSettings | None":
-        # KAKAO_KEY is the existing OAuth REST API key setting used by this
-        # application. Keep the search-specific name as the preferred override.
-        key = (
-            os.getenv("KAKAO_SEARCH_REST_API_KEY", "").strip()
-            or os.getenv("KAKAO_KEY", "").strip()
-        )
+        key = os.getenv("KAKAO_SEARCH_REST_API_KEY", "").strip()
         if not key:
             return None
         return cls(key, timeout_seconds=float(os.getenv("KAKAO_SEARCH_TIMEOUT", "8")))

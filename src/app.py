@@ -20,6 +20,13 @@ import os
 from urllib.parse import urlsplit
 
 
+def required_secret_from_env(name: str, *, min_length: int = 1) -> str:
+    value = os.getenv(name, "")
+    if not value.strip() or len(value.encode("utf-8")) < min_length:
+        raise ValueError(f"{name} is required and must be sufficiently long")
+    return value
+
+
 def frontend_url_from_env() -> str:
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173").strip().rstrip("/")
     parsed = urlsplit(frontend_url)
@@ -58,10 +65,9 @@ def cors_allowed_origins_from_env(frontend_url: str | None = None) -> list[str]:
 async def lifespan(app: FastAPI):
     setup_logging()
     # 카카오 소셜 로그인
-    kakao_client_secret = os.getenv("KAKAO_SECRET")
-    kakao_client_key = os.getenv("KAKAO_KEY")
-    if kakao_client_secret is None or kakao_client_key is None:
-        raise ValueError("KAKAO_SECRET or KAKAO_KEY is not set")
+    kakao_client_secret = required_secret_from_env("KAKAO_SECRET")
+    kakao_client_key = required_secret_from_env("KAKAO_KEY")
+    session_secret = required_secret_from_env("SESSION_SECRET", min_length=32)
 
     pg_host = os.getenv("PG_HOST", "localhost")
     pg_port = int(os.getenv("PG_PORT", "5432"))
@@ -85,7 +91,6 @@ async def lifespan(app: FastAPI):
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),
             db=int(os.getenv("REDIS_DB", "0")),
-            password=os.getenv("REDIS_PASSWORD"),
             decode_responses=True,
             socket_connect_timeout=5,
             socket_timeout=5,
@@ -96,14 +101,15 @@ async def lifespan(app: FastAPI):
             redis_client,
             ticket_ttl=int(os.getenv("SEARCH_MAGIC_CODE_TTL", "60")),
             query_ttl=int(os.getenv("SEARCH_QUERY_TTL", "180")),
+            rate_limit_secret=session_secret,
+            submission_limit=int(os.getenv("SEARCH_RATE_LIMIT_MAX", "10")),
+            rate_limit_window=int(os.getenv("SEARCH_RATE_LIMIT_WINDOW", "60")),
         )
 
         search_publisher = RabbitMQSearchPublisher(
             RabbitMQSettings(
                 host=os.getenv("RABBITMQ_HOST", "localhost"),
                 port=int(os.getenv("RABBITMQ_PORT", "5672")),
-                username=os.getenv("RABBITMQ_USER", "guest"),
-                password=os.getenv("RABBITMQ_PASSWORD", "guest"),
                 virtual_host=os.getenv("RABBITMQ_VHOST", "/"),
                 queue=os.getenv("SEARCH_QUEUE", "saver.search.requests"),
             )
@@ -120,7 +126,7 @@ async def lifespan(app: FastAPI):
             "DEFAULT_PROFILE_IMAGE_URL",
             f"{app.state.host}/assets/default-profile.svg",
         )
-        app.state.session_secret = os.getenv("SESSION_SECRET", kakao_client_secret)
+        app.state.session_secret = session_secret
         app.state.session_max_age = int(os.getenv("SESSION_MAX_AGE", "604800"))
         if app.state.session_max_age <= 0:
             raise ValueError("SESSION_MAX_AGE must be greater than zero")
