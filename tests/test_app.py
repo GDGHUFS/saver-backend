@@ -3,7 +3,35 @@ from unittest.mock import patch
 
 import httpx
 
-from src.app import app, cors_allowed_origins_from_env, frontend_url_from_env
+from src.app import (
+    app,
+    cors_allowed_origins_from_env,
+    frontend_url_from_env,
+    required_secret_from_env,
+)
+
+
+class RequiredSecretTest(unittest.TestCase):
+    def test_rejects_missing_or_short_session_secret(self):
+        for value in ("", "short", " " * 32):
+            with (
+                self.subTest(value=value),
+                patch.dict("os.environ", {"SESSION_SECRET": value}, clear=True),
+                self.assertRaises(ValueError),
+            ):
+                required_secret_from_env("SESSION_SECRET", min_length=32)
+
+    def test_accepts_sufficiently_long_session_secret(self):
+        secret = "s" * 32
+        with patch.dict(
+            "os.environ",
+            {"SESSION_SECRET": secret},
+            clear=True,
+        ):
+            self.assertEqual(
+                required_secret_from_env("SESSION_SECRET", min_length=32),
+                secret,
+            )
 
 
 class FrontendSettingsTest(unittest.TestCase):

@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ TICKET_PREFIX = "saver:search:ticket:"
 QUERY_PREFIX = "saver:search:query:"
 QUERY_KEY_PATTERN = re.compile(r"^saver:search:query:[0-9a-f]{64}$")
 VALID_STATUSES = frozenset({"PENDING", "COMPLETED", "FAILED"})
+RATE_LIMIT_PREFIX = "saver:search:rate:"
 
 
 CREATE_TICKET_SCRIPT = """
@@ -44,6 +47,14 @@ end
 return 0
 """
 
+RATE_LIMIT_SCRIPT = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
+
 
 class InvalidSearchData(ValueError):
     """Redis에 외부 계약과 맞지 않는 검색 데이터가 저장된 경우."""
@@ -63,13 +74,29 @@ class RedisSearchStore:
         ticket_ttl: int = 60,
         query_ttl: int = 180,
         max_result_bytes: int = 2_000_000,
+        rate_limit_secret: str | None = None,
+        submission_limit: int = 10,
+        rate_limit_window: int = 60,
     ) -> None:
-        if ticket_ttl <= 0 or query_ttl <= 0 or max_result_bytes <= 0:
-            raise ValueError("Search TTLs and result size must be positive")
+        if (
+            ticket_ttl <= 0
+            or query_ttl <= 0
+            or max_result_bytes <= 0
+            or submission_limit <= 0
+            or rate_limit_window <= 0
+        ):
+            raise ValueError("Search limits, TTLs, and result size must be positive")
         self._redis = redis
         self.ticket_ttl = ticket_ttl
         self.query_ttl = query_ttl
         self.max_result_bytes = max_result_bytes
+        self._rate_limit_secret = (
+            rate_limit_secret.encode("utf-8")
+            if isinstance(rate_limit_secret, str) and rate_limit_secret
+            else None
+        )
+        self.submission_limit = submission_limit
+        self.rate_limit_window = rate_limit_window
 
     @staticmethod
     def ticket_key(magic_code: str) -> str:
@@ -78,6 +105,27 @@ class RedisSearchStore:
     @staticmethod
     def query_key(query_hash: str) -> str:
         return f"{QUERY_PREFIX}{query_hash}"
+
+    def rate_limit_key(self, user_id: int) -> str:
+        if self._rate_limit_secret is None:
+            raise RuntimeError("search rate limit secret is not configured")
+        digest = hmac.new(
+            self._rate_limit_secret,
+            f"saver-search-rate-limit:v1:{user_id}".encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"{RATE_LIMIT_PREFIX}{digest}"
+
+    async def allow_submission(self, user_id: int) -> bool:
+        count = await self._redis.eval(
+            RATE_LIMIT_SCRIPT,
+            1,
+            self.rate_limit_key(user_id),
+            self.rate_limit_window,
+        )
+        if not isinstance(count, int) or count <= 0:
+            raise InvalidSearchData("unexpected search rate limit response")
+        return count <= self.submission_limit
 
     async def create_ticket(self, magic_code: str, query_hash: str) -> bool:
         result = await self._redis.eval(

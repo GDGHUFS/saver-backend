@@ -41,13 +41,29 @@ def kagi_result() -> KagiSearchResponse:
 
 
 class FakeStore:
-    def __init__(self, *, should_publish=True, state=None, error=None):
+    def __init__(
+        self,
+        *,
+        should_publish=True,
+        state=None,
+        error=None,
+        rate_limit_allowed=True,
+    ):
         self.should_publish = should_publish
         self.state = state
         self.error = error
+        self.rate_limit_allowed = rate_limit_allowed
+        self.rate_limit_window = 60
+        self.rate_limited_users = []
         self.created = []
         self.failed = []
         self.deleted = []
+
+    async def allow_submission(self, user_id):
+        if self.error:
+            raise self.error
+        self.rate_limited_users.append(user_id)
+        return self.rate_limit_allowed
 
     async def create_ticket(self, magic_code, query_hash):
         if self.error:
@@ -130,6 +146,19 @@ class SearchApiTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(store.created, [])
+
+    async def test_rate_limits_authenticated_search_submission(self):
+        store = FakeStore(rate_limit_allowed=False)
+        publisher = FakePublisher()
+        self.set_dependencies(store, publisher)
+
+        response = await self.client.post("/search", json={"query": "검색"})
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "60")
+        self.assertEqual(store.rate_limited_users, [1234])
+        self.assertEqual(store.created, [])
+        self.assertEqual(publisher.messages, [])
 
     async def test_rejects_result_lookup_without_login(self):
         store = FakeStore(state=SearchState(status="COMPLETED", result=kagi_result()))
