@@ -93,15 +93,20 @@ class RabbitMQSearchPublisher:
             exchange_type="fanout",
             durable=True,
         )
-        for queue in (
-            self._settings.legacy_queue,
-            self._settings.intelligent_queue,
-        ):
+        # legacy_queue는 기존 브로커 리소스와의 호환성을 위해 설정에 남겨두지만,
+        # 현재 검색 요청은 intelligent worker 한 곳으로만 전달한다.
+        for queue in (self._settings.legacy_queue, self._settings.intelligent_queue):
             self._channel.queue_declare(queue=queue, durable=True)
-            self._channel.queue_bind(
-                exchange=self._settings.exchange,
-                queue=queue,
-            )
+        # 이전 버전이 만들어 둔 fanout binding이 남아 있으면 legacy 큐로도
+        # 전달되므로, 연결 시 명시적으로 제거한다.
+        self._channel.queue_unbind(
+            exchange=self._settings.exchange,
+            queue=self._settings.legacy_queue,
+        )
+        self._channel.queue_bind(
+            exchange=self._settings.exchange,
+            queue=self._settings.intelligent_queue,
+        )
         self._channel.confirm_delivery()
 
     async def _heartbeat_loop(self) -> None:

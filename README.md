@@ -7,24 +7,24 @@
 ## 검색 API
 
 - `POST /search`: 로그인 사용자의 `{"query": "..."}`를 받아 `202`와 `magicCode`를 반환한다.
-- `GET /search/{magicCode}`: legacy와 intelligent 검색을 함께 조회한다. 하나라도 처리 중이면
-  준비된 결과를 포함한 `202`, 둘 다 종료되면 `COMPLETED` 또는 `PARTIAL` 상태의 `200`을 반환한 뒤
-  사용한 `magicCode`를 삭제한다. 둘 다 실패하면 `502`를 반환한다.
+- `GET /search/{magicCode}`: intelligent 검색 상태를 조회한다. 처리 중이면 `202`, 완료되면
+  같은 결과 객체를 legacy와 intelligent 필드에 함께 넣은 `COMPLETED` 상태의 `200`을 반환한 뒤
+  사용한 `magicCode`를 삭제한다.
 
 두 API 모두 유효한 Saver 세션 쿠키와 해당 사용자의 DB 행이 필요하다. 인증된 사용자 ID 원문은
 Redis 검색 상태 또는 RabbitMQ 메시지에 연결하거나 저장하지 않는다. 검색 접수 남용 방지를 위해
 세션 비밀값으로 HMAC 처리한 비가역 식별자만 별도 rate-limit 키에 사용한다.
 
 검색 상태의 유일한 원천은 Redis다. 두 결과가 모두 캐시되어 있으면 RabbitMQ 발행을 생략한다.
-하나라도 없으면 durable fanout exchange에 persistent 메시지를 한 번 발행하며, broker가 legacy와
-intelligent 전용 durable queue에 각각 한 부씩 전달한다. 이미 완료된 결과를 가진 worker는 메시지를
-멱등적으로 ACK한다. 조회 API는 RabbitMQ 또는 외부 검색 API를 호출하지 않는다.
+없으면 durable exchange를 통해 intelligent 전용 durable queue에 persistent 메시지를 한 번 발행한다.
+legacy 필드는 intelligent 결과 객체를 그대로 가리키는 API 호환용 alias이며, legacy queue에는 신규
+메시지를 전달하지 않는다. 조회 API는 RabbitMQ 또는 외부 검색 API를 호출하지 않는다.
 
 기본 키와 TTL은 다음과 같다.
 
 - `saver:search:ticket:{magicCode}`: hash, 기본 TTL 300초, 필드 `status`, `query_key`,
   `intelligent_query_key`
-- `saver:search:query:{sha256}`: legacy worker 상태와 결과, 기본 TTL 600초
+- `saver:search:query:{sha256}`: 기존 키와의 호환을 위해 유지되지만 신규 worker는 사용하지 않음
 - `saver:search:query:{sha256}:intelligent`: intelligent worker 상태와 결과, 기본 TTL 600초
 - `saver:search:rate:{hmac}`: 사용자별 검색 접수 횟수, 기본 60초
 

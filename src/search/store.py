@@ -23,20 +23,13 @@ RATE_LIMIT_PREFIX = "saver:search:rate:"
 
 
 CREATE_TICKET_SCRIPT = """
-local legacy_status = redis.call('HGET', KEYS[2], 'status')
-local legacy_has_result = redis.call('HEXISTS', KEYS[2], 'result')
 local intelligent_status = redis.call('HGET', KEYS[3], 'status')
 local intelligent_has_result = redis.call('HEXISTS', KEYS[3], 'result')
 
-local legacy_completed = legacy_status == 'COMPLETED' and legacy_has_result == 1
 local intelligent_completed =
     intelligent_status == 'COMPLETED' and intelligent_has_result == 1
-local should_publish = (legacy_completed and intelligent_completed) and 0 or 1
+local should_publish = intelligent_completed and 0 or 1
 
-if not legacy_completed then
-    redis.call('HSET', KEYS[2], 'status', 'PENDING')
-    redis.call('HDEL', KEYS[2], 'result', 'error_code')
-end
 if not intelligent_completed then
     redis.call('HSET', KEYS[3], 'status', 'PENDING')
     redis.call('HDEL', KEYS[3], 'result', 'error_code')
@@ -209,22 +202,18 @@ class RedisSearchStore:
                 intelligent=IntelligentSearchState(status="FAILED"),
             )
 
-        legacy_query = await self._redis.hgetall(query_key)
         intelligent_query = await self._redis.hgetall(intelligent_query_key)
-        legacy_status, legacy_result = self._validated_query_state(
-            legacy_query,
-            KagiSearchResponse,
-            "legacy",
-        )
         intelligent_status, intelligent_result = self._validated_query_state(
             intelligent_query,
             IntelligentSearchResponse,
             "intelligent",
         )
+        # legacy 필드는 API 하위 호환용 alias다. 별도 큐/결과를 조회하지 않고
+        # intelligent 결과 객체를 그대로 가리킨다.
         return SearchState(
             legacy=LegacySearchState(
-                status=legacy_status,
-                result=legacy_result,
+                status=intelligent_status,
+                result=intelligent_result,
             ),
             intelligent=IntelligentSearchState(
                 status=intelligent_status,

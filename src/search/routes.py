@@ -60,7 +60,7 @@ def storage_unavailable(operation: str, exc: BaseException) -> HTTPException:
     summary="검색 작업 접수",
     description=(
         "로그인한 사용자의 검색어를 정규화해 Redis에 짧은 수명의 검색 상태를 만들고 magicCode를 발급합니다. "
-        "Redis에 legacy와 intelligent 결과가 모두 완료되어 있지 않을 때 durable fanout exchange에 "
+        "Redis에 intelligent 결과가 완료되어 있지 않을 때 durable exchange에 "
         "검색 명령을 한 번 발행하며, "
         "외부 검색 결과를 이 응답에 포함하지 않습니다. 사용자 ID는 검색 데이터에 저장하지 않습니다."
     ),
@@ -150,16 +150,15 @@ async def submit_search(
     response_model_by_alias=True,
     summary="검색 상태 및 결과 조회",
     description=(
-        "로그인한 사용자가 magicCode로 legacy 및 intelligent 검색 상태를 함께 확인합니다. "
-        "하나라도 처리 중이면 준비된 결과를 포함해 202를 반환합니다. 두 작업이 모두 종료되면 "
-        "COMPLETED 또는 PARTIAL 상태와 함께 200을 반환하고 magicCode를 삭제합니다. "
-        "두 작업이 모두 실패하면 502를 반환합니다. 이 API는 외부 검색 호출이나 RabbitMQ 발행을 "
+        "로그인한 사용자가 magicCode로 검색 상태를 확인합니다. intelligent 결과가 처리 중이면 "
+        "202를 반환하고, 완료되면 같은 결과 객체를 legacy와 intelligent 필드에 함께 노출한 뒤 "
+        "200을 반환하고 magicCode를 삭제합니다. 이 API는 외부 검색 호출이나 RabbitMQ 발행을 "
         "수행하지 않습니다."
     ),
     responses={
         200: {
             "description": (
-                "두 작업이 종료되어 COMPLETED 또는 PARTIAL 결과가 반환됨"
+                "검색 결과가 완료되어 호환 필드와 함께 반환됨"
             )
         },
         202: {
@@ -194,10 +193,7 @@ async def get_search_result(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="검색 작업을 찾을 수 없거나 magicCode가 만료되었습니다.",
         )
-    branch_statuses = {
-        search_state.legacy.status,
-        search_state.intelligent.status,
-    }
+    branch_statuses = {search_state.intelligent.status}
     if not branch_statuses.issubset({"PENDING", "COMPLETED", "FAILED"}):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
