@@ -125,7 +125,7 @@ frontend, backend, Redis 및 RabbitMQ를 거치지 않고 현재 지능형 검�
 
 ```bash
 python -m src.search.engine.cli "서울시 월세 원룸 거주 1인 가구가 지원받을 수 있는 주거 정책 알려줘"
-python -m src.search.engine.cli "서울에서 무료로 관람할 수 있는 미술과 알려줘"
+python -m src.search.engine.cli "서울에서 무료로 관람할 수 있는 미술관 알려줘"
 ```
 
 답변과 실행 메타데이터 및 Provider 검색 결과 확인:
